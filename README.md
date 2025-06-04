@@ -268,7 +268,7 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 
 ## Changelog
 
-### v1.0.0 (2024-12-05)
+### v1.0.0 (2025-06-05)
 - Initial release
 - Full YM2149 emulation
 - Support for YM2-YM6 formats
