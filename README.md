@@ -8,7 +8,7 @@ A cross-platform YM music file player written in Go, supporting the Atari ST YM2
 
 ## Overview
 
-YM Player is a modern implementation of the STSound library in Go, capable of playing YM music files from the Atari ST era. It faithfully emulates the YM2149 sound chip and supports various YM file formats, including compressed files.
+YM Player is a modern implementation of the STSound library in Go, capable of playing YM music files from the Atari ST era. It faithfully emulates the YM2149 sound chip and supports various YM file formats, including compressed files. Available as both command-line tool and graphical application.
 
 ### Features
 
@@ -19,6 +19,7 @@ YM Player is a modern implementation of the STSound library in Go, capable of pl
 - 🎛️ **Audio controls** - Volume adjustment, looping, low-pass filter
 - 💾 **WAV export** - Save YM files as WAV for use in other applications
 - 🖥️ **Cross-platform** - Works on Windows, macOS, Linux (Intel/ARM)
+- 🎨 **Modern GUI** - User-friendly interface with playlist management
 
 ## Installation
 
@@ -26,6 +27,7 @@ YM Player is a modern implementation of the STSound library in Go, capable of pl
 
 - Go 1.21 or higher
 - C compiler (for CGo dependencies)
+- For GUI: System graphics libraries (usually pre-installed)
 
 ### Building from source
 
@@ -34,16 +36,66 @@ YM Player is a modern implementation of the STSound library in Go, capable of pl
 git clone https://github.com/olivierh59500/ym-player.git
 cd ym-player
 
-# Build the player
+# Build command-line player
 go build ./cmd/ymplayer
+
+# Build GUI player
+go build -tags gui -o ymplayer-gui ./cmd/ymplayer-gui
 
 # Or install globally
 go install ./cmd/ymplayer
+go install -tags gui ./cmd/ymplayer-gui
 ```
 
 ## Usage
 
-### Basic playback
+### GUI Application
+
+The graphical interface provides an intuitive way to play YM files:
+
+```bash
+# Launch the GUI
+./ymplayer-gui
+
+# Or open with a specific file
+./ymplayer-gui music.ym
+
+# Note: To suppress Fyne thread warning messages, launch with:
+./ymplayer-gui 2>/dev/null
+# Or on Windows:
+# ymplayer-gui.exe 2>nul
+```
+
+> **Note**: The GUI may display thread warning messages in the console. These are development warnings from the Fyne framework and do not affect functionality. They can be safely ignored by redirecting stderr as shown above.
+
+#### GUI Features
+
+- **Playlist Management**
+  - Add individual files or entire folders
+  - Save/Load playlists (M3U and JSON formats)
+  - Sort by title, author, or duration
+  - Shuffle playlist order
+
+- **Playback Controls**
+  - Play/Pause/Stop with visual feedback
+  - Previous/Next track navigation
+  - Progress bar with time display
+  - Volume control with slider
+
+- **Advanced Options**
+  - Loop single track or entire playlist
+  - Repeat modes: Off, One, All
+  - Low-pass filter toggle
+  - Shuffle playback
+
+- **File Operations**
+  - Export current track to WAV
+  - Automatic metadata display
+  - Support for compressed YM files
+
+### Command-Line Interface
+
+#### Basic playback
 
 ```bash
 # Play a YM file
@@ -53,7 +105,7 @@ go install ./cmd/ymplayer
 ./ymplayer -info music.ym
 ```
 
-### Command-line options
+#### Command-line options
 
 ```
 Usage: ymplayer [options] <ym-file>
@@ -79,7 +131,7 @@ Options:
         Output WAV file (when using wav output)
 ```
 
-### Examples
+#### Examples
 
 ```bash
 # Play with double volume
@@ -110,13 +162,23 @@ Options:
 - **LH4** - LZ77 + Static Huffman
 - **LH5** - LZ77 + Dynamic Huffman
 
+### Playlist Formats
+- **M3U** - Standard playlist format
+- **JSON** - Extended format with metadata
+
 ## Project Structure
 
 ```
 ym-player/
 ├── cmd/
-│   └── ymplayer/       # Main player application
-│       └── main.go
+│   ├── ymplayer/       # Command-line player
+│   │   └── main.go
+│   └── ymplayer-gui/   # GUI player
+│       ├── main.go
+│       ├── main_gui.go
+│       ├── gui.go
+│       ├── playlist.go
+│       └── wavoutput-gui.go
 ├── pkg/
 │   ├── audio/          # Audio output interfaces
 │   │   ├── output.go
@@ -197,6 +259,8 @@ The player correctly handles endianness differences:
 
 ## Building for Different Platforms
 
+### Command-line version
+
 ```bash
 # Windows
 GOOS=windows GOARCH=amd64 go build -o ymplayer.exe ./cmd/ymplayer
@@ -212,6 +276,22 @@ GOOS=linux GOARCH=amd64 go build -o ymplayer-linux ./cmd/ymplayer
 
 # Linux (ARM)
 GOOS=linux GOARCH=arm64 go build -o ymplayer-linux-arm64 ./cmd/ymplayer
+```
+
+### GUI version
+
+```bash
+# Windows
+GOOS=windows GOARCH=amd64 go build -tags gui -o ymplayer-gui.exe ./cmd/ymplayer-gui
+
+# macOS (Intel)
+GOOS=darwin GOARCH=amd64 go build -tags gui -o ymplayer-gui-mac ./cmd/ymplayer-gui
+
+# macOS (Apple Silicon)
+GOOS=darwin GOARCH=arm64 go build -tags gui -o ymplayer-gui-mac-arm64 ./cmd/ymplayer-gui
+
+# Linux
+GOOS=linux GOARCH=amd64 go build -tags gui -o ymplayer-gui-linux ./cmd/ymplayer-gui
 ```
 
 ## Contributing
@@ -232,11 +312,24 @@ go run ./cmd/ymplayer -cpuprofile=cpu.prof music.ym
 go tool pprof cpu.prof
 ```
 
+## Screenshots
+
+### GUI Application
+- Modern dark/light theme support
+- Intuitive playlist management
+- Real-time playback visualization
+
+### Features in Action
+- Metadata display with cover art support
+- Progress tracking and time display
+- Volume and filter controls
+
 ## Credits
 
 - Original STSound library by Arnaud Carré (Leonard/Oxygene)
 - YM file format by Leonard/Oxygene
 - LZH decompression based on Haruhiko Okumura and Kerwin F. Medina's work
+- Fyne GUI framework by Andrew Williams and contributors
 - Go port and enhancements by Olivier Houte
 
 ## License
@@ -248,25 +341,66 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 - [YM Format Documentation](http://leonard.oxg.free.fr/ymformat.html)
 - [Atari ST Sound Archive](http://sndh.atari.org/)
 - [STSound Original Library](http://leonard.oxg.free.fr/stsound.html)
+- [Fyne Framework](https://fyne.io/)
 
 ## Troubleshooting
 
-### No sound output
+### GUI Issues
+
+#### Application won't start
+- Ensure graphics drivers are up to date
+- Check if OpenGL is available on your system
+- Try running the command-line version first
+
+#### Console shows thread warnings
+- These are Fyne framework development warnings
+- They don't affect the application functionality
+- To suppress them, run: `./ymplayer-gui 2>/dev/null`
+- On Windows: `ymplayer-gui.exe 2>nul`
+
+#### Dark theme issues
+- The GUI adapts to your system theme
+- Force light mode by setting environment: `FYNE_THEME=light`
+
+### Audio Issues
+
+#### No sound output
 - Check your system's audio settings
 - Try increasing the buffer size: `-buffer 4096`
 - Verify the YM file is not corrupted
 
-### Choppy playback
+#### Choppy playback
 - Increase buffer size: `-buffer 4096`
 - Lower sample rate: `-rate 22050`
 - Close other audio applications
 
-### Cannot load file
+#### "Context already created" error
+- Restart the application
+- Check if another instance is running
+- Update to the latest version
+
+### File Issues
+
+#### Cannot load file
 - Ensure the file is a valid YM format
 - Check if the file is compressed (look for LZH header)
 - Try with a known working YM file
 
+#### Playlist won't save
+- Check write permissions in the directory
+- Ensure valid filename extension (.m3u or .json)
+
 ## Changelog
+
+### v1.1.0 (2025-06-05)
+- Added GUI application with Fyne
+- Playlist management support
+- M3U and JSON playlist formats
+- Modern dark/light theme
+- Improved audio output handling
+- Fixed Oto context management
+- Added precise volume control (1% increments)
+- Known issue: Fyne thread warnings (cosmetic only, use `2>/dev/null` to suppress)
 
 ### v1.0.0 (2025-06-05)
 - Initial release

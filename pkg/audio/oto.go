@@ -9,9 +9,15 @@ import (
 	"github.com/ebitengine/oto/v3"
 )
 
+var (
+	// Global Oto context singleton
+	globalOtoMutex sync.Mutex
+	globalContext  *oto.Context
+	globalPlayers  int
+)
+
 // StreamingOtoOutput uses Oto v3 for cross-platform audio
 type StreamingOtoOutput struct {
-	context    *oto.Context
 	player     *oto.Player
 	writer     *io.PipeWriter
 	reader     *io.PipeReader
@@ -33,7 +39,7 @@ func (s *StreamingOtoOutput) Open(sampleRate, channels, bufferSize int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.context != nil {
+	if s.player != nil {
 		return fmt.Errorf("stream already open")
 	}
 
@@ -44,26 +50,34 @@ func (s *StreamingOtoOutput) Open(sampleRate, channels, bufferSize int) error {
 	// Create pipe for streaming
 	s.reader, s.writer = io.Pipe()
 
-	// Create Oto context with proper buffer size for low latency
-	bufferSizeInBytes := bufferSize * channels * 2 // 2 bytes per sample
-	
-	op := &oto.NewContextOptions{
-		SampleRate:   sampleRate,
-		ChannelCount: channels,
-		Format:       oto.FormatSignedInt16LE,
-		BufferSize:   time.Duration(bufferSizeInBytes) * time.Second / time.Duration(sampleRate*channels*2),
-	}
+	// Get or create the global context
+	globalOtoMutex.Lock()
+	if globalContext == nil {
+		// Create Oto context with proper buffer size for low latency
+		bufferSizeInBytes := bufferSize * channels * 2 // 2 bytes per sample
 
-	context, ready, err := oto.NewContext(op)
-	if err != nil {
-		return fmt.Errorf("failed to create oto context: %w", err)
-	}
+		op := &oto.NewContextOptions{
+			SampleRate:   sampleRate,
+			ChannelCount: channels,
+			Format:       oto.FormatSignedInt16LE,
+			BufferSize:   time.Duration(bufferSizeInBytes) * time.Second / time.Duration(sampleRate*channels*2),
+		}
 
-	<-ready
-	s.context = context
+		context, ready, err := oto.NewContext(op)
+		if err != nil {
+			globalOtoMutex.Unlock()
+			return fmt.Errorf("failed to create oto context: %w", err)
+		}
+
+		<-ready
+		globalContext = context
+	}
+	globalPlayers++
+	context := globalContext
+	globalOtoMutex.Unlock()
 
 	// Create player with buffered reader
-	s.player = s.context.NewPlayer(s.reader)
+	s.player = context.NewPlayer(s.reader)
 	s.closed = false
 
 	// Start playing in background
@@ -84,17 +98,20 @@ func (s *StreamingOtoOutput) Close() error {
 	if s.closed {
 		return nil
 	}
-	
+
 	s.closed = true
 
 	// Close writer first to signal EOF
 	if s.writer != nil {
 		s.writer.Close()
+		s.writer = nil
 	}
 
-	// Wait for playback to finish
+	// Wait a bit for buffer to flush
+	time.Sleep(100 * time.Millisecond)
+
+	// Close player
 	if s.player != nil {
-		time.Sleep(100 * time.Millisecond) // Allow buffer to flush
 		s.player.Close()
 		s.player = nil
 	}
@@ -102,13 +119,14 @@ func (s *StreamingOtoOutput) Close() error {
 	// Close reader
 	if s.reader != nil {
 		s.reader.Close()
+		s.reader = nil
 	}
 
-	// Suspend context
-	if s.context != nil {
-		s.context.Suspend()
-		s.context = nil
-	}
+	// Decrease player count
+	globalOtoMutex.Lock()
+	globalPlayers--
+	// Don't suspend context - keep it alive for reuse
+	globalOtoMutex.Unlock()
 
 	s.wg.Wait()
 	return nil
@@ -158,7 +176,7 @@ func NewFallbackOutput() (*FallbackOutput, error) {
 func (f *FallbackOutput) Open(sampleRate, channels, bufferSize int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	
+
 	f.sampleRate = sampleRate
 	f.channels = channels
 	f.closed = false
@@ -168,7 +186,7 @@ func (f *FallbackOutput) Open(sampleRate, channels, bufferSize int) error {
 func (f *FallbackOutput) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	
+
 	f.closed = true
 	return nil
 }

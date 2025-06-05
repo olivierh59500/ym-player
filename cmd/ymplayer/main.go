@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -288,41 +289,30 @@ func (w *WAVOutput) Open(sampleRate, channels, bufferSize int) error {
 	// Write WAV header (we'll update it later)
 	header := make([]byte, 44)
 	copy(header[0:4], []byte("RIFF"))
+	// File size - 8 (will be updated later)
+	binary.LittleEndian.PutUint32(header[4:8], 0)
 	copy(header[8:12], []byte("WAVE"))
 	copy(header[12:16], []byte("fmt "))
-
 	// Format chunk size
-	header[16] = 16
-
+	binary.LittleEndian.PutUint32(header[16:20], 16)
 	// Audio format (PCM)
-	header[20] = 1
-
+	binary.LittleEndian.PutUint16(header[20:22], 1)
 	// Number of channels
-	header[22] = byte(channels)
-
+	binary.LittleEndian.PutUint16(header[22:24], uint16(channels))
 	// Sample rate
-	header[24] = byte(sampleRate)
-	header[25] = byte(sampleRate >> 8)
-	header[26] = byte(sampleRate >> 16)
-	header[27] = byte(sampleRate >> 24)
-
+	binary.LittleEndian.PutUint32(header[24:28], uint32(sampleRate))
 	// Byte rate
 	byteRate := sampleRate * channels * 2
-	header[28] = byte(byteRate)
-	header[29] = byte(byteRate >> 8)
-	header[30] = byte(byteRate >> 16)
-	header[31] = byte(byteRate >> 24)
-
+	binary.LittleEndian.PutUint32(header[28:32], uint32(byteRate))
 	// Block align
 	blockAlign := channels * 2
-	header[32] = byte(blockAlign)
-	header[33] = byte(blockAlign >> 8)
-
+	binary.LittleEndian.PutUint16(header[32:34], uint16(blockAlign))
 	// Bits per sample
-	header[34] = 16
-
+	binary.LittleEndian.PutUint16(header[34:36], 16)
 	// Data chunk
 	copy(header[36:40], []byte("data"))
+	// Data size (will be updated later)
+	binary.LittleEndian.PutUint32(header[40:44], 0)
 
 	_, err = w.file.Write(header)
 	return err
@@ -336,22 +326,12 @@ func (w *WAVOutput) Close() error {
 	// Update header with final size
 	w.file.Seek(4, 0)
 	fileSize := uint32(w.written + 36)
-	w.file.Write([]byte{
-		byte(fileSize),
-		byte(fileSize >> 8),
-		byte(fileSize >> 16),
-		byte(fileSize >> 24),
-	})
+	binary.Write(w.file, binary.LittleEndian, fileSize)
 
 	// Update data chunk size
 	w.file.Seek(40, 0)
 	dataSize := uint32(w.written)
-	w.file.Write([]byte{
-		byte(dataSize),
-		byte(dataSize >> 8),
-		byte(dataSize >> 16),
-		byte(dataSize >> 24),
-	})
+	binary.Write(w.file, binary.LittleEndian, dataSize)
 
 	return w.file.Close()
 }
