@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"ym-player/pkg/audio"
-	"ym-player/pkg/stsound"
+	"github.com/olivierh59500/ym-player/pkg/audio"
+	"github.com/olivierh59500/ym-player/pkg/stsound"
 )
 
 var (

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"ym-player/pkg/lzh"
+	"github.com/olivierh59500/ym-player/pkg/lzh"
 )
 
 // LoadYMFile loads a YM file from disk, handling both compressed and uncompressed formats

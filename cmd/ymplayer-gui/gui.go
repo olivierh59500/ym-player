@@ -18,8 +18,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"ym-player/pkg/audio"
-	"ym-player/pkg/stsound"
+	"github.com/olivierh59500/ym-player/pkg/audio"
+	"github.com/olivierh59500/ym-player/pkg/stsound"
 )
 
 type YMPlayerGUI struct {

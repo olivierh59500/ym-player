@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"ym-player/pkg/lzh"
+	"github.com/olivierh59500/ym-player/pkg/lzh"
 )
 
 // MFP chip predivisor

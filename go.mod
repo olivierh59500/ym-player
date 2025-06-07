@@ -1,6 +1,6 @@
-module ym-player
+module github.com/olivierh59500/ym-player
 
-go 1.24.3
+go 1.24.4
 
 require (
 	fyne.io/fyne/v2 v2.6.1
