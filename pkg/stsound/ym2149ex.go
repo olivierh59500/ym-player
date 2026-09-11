@@ -147,21 +147,9 @@ func (ym *CYm2149Ex) initEnvelopeData() {
 			d := b - a
 			a *= 15
 			for i := 0; i < 16; i++ {
-				val := a
+                ym.envData[env][pEnv/32][pEnv%32] = YmU8(a)
 				a += d
-				if val < 0 {
-					val = 0
-				} else if val > 15 {
-					val = 15
-				}
-				// Phase 0 et 1 seulement (le C++ utilise 2 phases avec 32 positions)
-				if phase < 2 {
-					ym.envData[env][phase][pEnv] = YmU8(val)
-					pEnv++
-				}
-			}
-			if phase == 1 {
-				pEnv = 0  // Reset pour la phase suivante
+				pEnv++
 			}
 		}
 	}
