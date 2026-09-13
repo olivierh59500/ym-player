@@ -1,11 +1,9 @@
 package lzh
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 )
 
 // LZH constants from original C++ code
@@ -31,16 +29,13 @@ const (
 // Decoder structure
 type Decoder struct {
 	// Input/Output
-	input  *bytes.Reader
-	output *bytes.Buffer
+	input    []byte
+	inputPos int
 
 	// Bit buffer
-	bitbuf      uint16
-	subbitbuf   uint8
-	bitcount    int
-	fillbufsize int
-	fillbuf_i   int
-	buf         [BUFSIZE]byte
+	bitbuf    uint16
+	subbitbuf uint8
+	bitcount  int
 
 	// Huffman trees
 	left     [2*NC - 1]uint16
@@ -53,12 +48,19 @@ type Decoder struct {
 	// Decode state
 	blocksize uint16
 	decode_j  int
-	decode_i  uint32
+	decode_i  int
 	outbuf    [DICSIZ]uint8
 }
 
-// Decompress decompresses LH5 compressed data
-func Decompress(data []byte) ([]byte, error) {
+// Decompress decompresses LH0, LH4, or LH5 data.
+func Decompress(data []byte) (output []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			output = nil
+			err = fmt.Errorf("invalid LZH data: %v", recovered)
+		}
+	}()
+
 	if len(data) < 7 {
 		return nil, errors.New("data too small")
 	}
@@ -76,90 +78,49 @@ func Decompress(data []byte) ([]byte, error) {
 		return nil, errors.New("LZH header not found")
 	}
 
-	reader := bytes.NewReader(data[headerStart:])
-
-	// Read header
-	var header struct {
-		HeaderSize   uint8
-		HeaderSum    uint8
-		Method       [5]uint8
-		PackedSize   uint32
-		OriginalSize uint32
-		FileTime     uint32
-		Attribute    uint8
-		Level        uint8
+	if len(data)-headerStart < 15 {
+		return nil, errors.New("truncated LZH header")
+	}
+	header := data[headerStart:]
+	headerSize := int(header[0])
+	if headerSize < 13 {
+		return nil, fmt.Errorf("invalid LZH header size: %d", headerSize)
 	}
 
-	// Read header size
-	if err := binary.Read(reader, binary.LittleEndian, &header.HeaderSize); err != nil {
-		return nil, err
+	method := header[5]
+	if method != '5' && method != '4' && method != '0' {
+		return nil, fmt.Errorf("unsupported method: %s", header[2:7])
 	}
 
-	// Read header checksum
-	if err := binary.Read(reader, binary.LittleEndian, &header.HeaderSum); err != nil {
-		return nil, err
+	packedSize := binary.LittleEndian.Uint32(header[7:11])
+	originalSize := binary.LittleEndian.Uint32(header[11:15])
+	payloadStart := headerStart + headerSize + 2
+	if payloadStart > len(data) {
+		return nil, errors.New("truncated LZH header")
 	}
-
-	// Read method
-	if _, err := reader.Read(header.Method[:]); err != nil {
-		return nil, err
-	}
-
-	methodStr := string(header.Method[:])
-	if methodStr != "-lh5-" && methodStr != "-lh4-" && methodStr != "-lh0-" {
-		return nil, fmt.Errorf("unsupported method: %s", methodStr)
-	}
-
-	// Read sizes
-	if err := binary.Read(reader, binary.LittleEndian, &header.PackedSize); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(reader, binary.LittleEndian, &header.OriginalSize); err != nil {
-		return nil, err
-	}
-
-	// Skip the rest of the header
-	// We've read: 1 + 1 + 5 + 4 + 4 = 15 bytes
-	// Total header size is HeaderSize + 2
-	toSkip := int(header.HeaderSize) + 2 - 15
-	if toSkip > 0 {
-		if _, err := reader.Seek(int64(toSkip), 1); err != nil {
-			return nil, err
-		}
+	available := len(data) - payloadStart
+	// Some historical YM archives have an inaccurate packed-size field but a
+	// valid bitstream. Clamp to the available bytes as the original decoder did.
+	payloadSize := int(min(uint64(packedSize), uint64(available)))
+	payload := data[payloadStart : payloadStart+payloadSize]
+	if uint64(originalSize) > uint64(^uint(0)>>1) {
+		return nil, errors.New("uncompressed LZH size is too large")
 	}
 
 	// For -lh0-, data is uncompressed
-	if methodStr == "-lh0-" {
-		output := make([]byte, header.OriginalSize)
-		n, err := reader.Read(output)
-		if err != nil && err != io.EOF {
-			return nil, err
+	if method == '0' {
+		if int(originalSize) > len(payload) {
+			return nil, fmt.Errorf("incomplete data: got %d, expected %d", len(payload), originalSize)
 		}
-		if n != int(header.OriginalSize) {
-			return nil, fmt.Errorf("incomplete data: got %d, expected %d", n, header.OriginalSize)
-		}
+		output := make([]byte, int(originalSize))
+		copy(output, payload)
 		return output, nil
 	}
 
-	// Read compressed data
-	compressedData := make([]byte, header.PackedSize)
-	n, err := reader.Read(compressedData)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-
-	// Create decoder
-	decoder := &Decoder{
-		input:  bytes.NewReader(compressedData[:n]),
-		output: bytes.NewBuffer(make([]byte, 0, header.OriginalSize)),
-	}
-
-	// Decode
-	if err := decoder.decode(int(header.OriginalSize)); err != nil {
-		return nil, err
-	}
-
-	return decoder.output.Bytes(), nil
+	output = make([]byte, int(originalSize))
+	decoder := Decoder{input: payload}
+	decoder.decode(output)
+	return output, nil
 }
 
 func (d *Decoder) fillbuf(n int) {
@@ -168,16 +129,9 @@ func (d *Decoder) fillbuf(n int) {
 		d.bitbuf |= uint16(d.subbitbuf) << (n - d.bitcount)
 		n -= d.bitcount
 
-		if d.fillbufsize == 0 {
-			d.fillbuf_i = 0
-			nread, _ := d.input.Read(d.buf[:BUFSIZE-32])
-			d.fillbufsize = nread
-		}
-
-		if d.fillbufsize > 0 {
-			d.fillbufsize--
-			d.subbitbuf = d.buf[d.fillbuf_i]
-			d.fillbuf_i++
+		if d.inputPos < len(d.input) {
+			d.subbitbuf = d.input[d.inputPos]
+			d.inputPos++
 		} else {
 			d.subbitbuf = 0
 		}
@@ -197,7 +151,7 @@ func (d *Decoder) init_getbits() {
 	d.bitbuf = 0
 	d.subbitbuf = 0
 	d.bitcount = 0
-	d.fillbufsize = 0
+	d.inputPos = 0
 	d.fillbuf(BITBUFSIZ)
 }
 
@@ -444,43 +398,35 @@ func (d *Decoder) decode_p() uint16 {
 	return j
 }
 
-func (d *Decoder) decode(origSize int) error {
+func (d *Decoder) decode(output []byte) {
 	// Initialize
 	d.init_getbits()
 	d.blocksize = 0
 	d.decode_j = 0
 
-	for origSize > 0 {
-		count := origSize
+	for offset := 0; offset < len(output); {
+		count := len(output) - offset
 		if count > DICSIZ {
 			count = DICSIZ
 		}
 
-		// Decode into buffer
 		d.decodeBuffer(count)
-
-		// Write to output
-		if _, err := d.output.Write(d.outbuf[:count]); err != nil {
-			return err
-		}
-
-		origSize -= count
+		copy(output[offset:offset+count], d.outbuf[:count])
+		offset += count
 	}
-
-	return nil
 }
 
 func (d *Decoder) decodeBuffer(count int) {
-	r := uint32(0)
+	r := 0
 
-	for d.decode_j > 0 && r < uint32(count) {
+	for d.decode_j > 0 && r < count {
 		d.outbuf[r] = d.outbuf[d.decode_i]
 		d.decode_i = (d.decode_i + 1) & (DICSIZ - 1)
 		r++
 		d.decode_j--
 	}
 
-	for r < uint32(count) {
+	for r < count {
 		c := d.decode_c()
 
 		if c <= UCHAR_MAX {
@@ -489,9 +435,20 @@ func (d *Decoder) decodeBuffer(count int) {
 		} else {
 			d.decode_j = int(c) - (UCHAR_MAX + 1 - THRESHOLD)
 			p := d.decode_p()
-			d.decode_i = (r - uint32(p) - 1) & (DICSIZ - 1)
+			distance := int(p) + 1
+			d.decode_i = (r - distance) & (DICSIZ - 1)
 
-			for d.decode_j > 0 && r < uint32(count) {
+			// Non-overlapping matches that do not wrap around the dictionary can
+			// use the runtime's optimized copy implementation.
+			if d.decode_j <= count-r && d.decode_j <= distance && r >= distance {
+				copy(d.outbuf[r:r+d.decode_j], d.outbuf[d.decode_i:d.decode_i+d.decode_j])
+				r += d.decode_j
+				d.decode_i = (d.decode_i + d.decode_j) & (DICSIZ - 1)
+				d.decode_j = 0
+				continue
+			}
+
+			for d.decode_j > 0 && r < count {
 				d.outbuf[r] = d.outbuf[d.decode_i]
 				d.decode_i = (d.decode_i + 1) & (DICSIZ - 1)
 				r++

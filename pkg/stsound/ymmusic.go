@@ -2,27 +2,27 @@ package stsound
 
 // CYmMusic - Main YM music player class
 type CYmMusic struct {
-	ymChip          *CYm2149Ex
-	lastError       string
-	songType        YmFileType
-	nbFrame         int
-	loopFrame       int
-	currentFrame    int
-	nbDrum          int
-	pDrumTab        []DigiDrum
-	musicTime       int
-	pBigMalloc      []byte
-	pDataStream     []byte
-	bLoop           YmBool
-	fileSize        YmInt
-	playerRate      YmInt
-	attrib          YmInt
-	bMusicOk        YmBool
-	bPause          YmBool
-	streamInc       int
-	innerSamplePos  int
-	replayRate      int
-	bMusicOver      YmBool
+	ymChip         *CYm2149Ex
+	lastError      string
+	songType       YmFileType
+	nbFrame        int
+	loopFrame      int
+	currentFrame   int
+	nbDrum         int
+	pDrumTab       []DigiDrum
+	musicTime      int
+	pBigMalloc     []byte
+	pDataStream    []byte
+	bLoop          YmBool
+	fileSize       YmInt
+	playerRate     YmInt
+	attrib         YmInt
+	bMusicOk       YmBool
+	bPause         YmBool
+	streamInc      int
+	innerSamplePos int
+	replayRate     int
+	bMusicOver     YmBool
 
 	// Song information
 	pSongName    string
@@ -43,18 +43,18 @@ type CYmMusic struct {
 	currentPos          YmU32
 
 	// Time info
-	nbTimeKey                int
-	pTimeInfo                []TimeKey
-	musicLenInMs             YmU32
-	iMusicPosAccurateSample  YmU32
-	iMusicPosInMs            YmU32
+	nbTimeKey               int
+	pTimeInfo               []TimeKey
+	musicLenInMs            YmU32
+	iMusicPosAccurateSample YmU32
+	iMusicPosInMs           YmU32
 
 	// Tracker-specific
-	nbVoice                  int
-	ymTrackerVoice           [MAX_VOICE]YmTrackerVoice
-	ymTrackerNbSampleBefore  int
-	ymTrackerVolumeTable     [256 * 64]YmSample
-	ymTrackerFreqShift       int
+	nbVoice                 int
+	ymTrackerVoice          [MAX_VOICE]YmTrackerVoice
+	ymTrackerNbSampleBefore int
+	ymTrackerVolumeTable    []YmSample
+	ymTrackerFreqShift      int
 }
 
 // NewYmMusic creates a new YM music player
@@ -242,9 +242,7 @@ func (ym *CYmMusic) setLastError(err string) {
 }
 
 func (ym *CYmMusic) bufferClear(pBuffer []YmSample, nbSample int) {
-	for i := 0; i < nbSample; i++ {
-		pBuffer[i] = 0
-	}
+	clear(pBuffer[:nbSample])
 }
 
 func (ym *CYmMusic) unLoad() {
@@ -560,6 +558,12 @@ func (ym *CYmMusic) ymTrackerInit(volMaxPercent int) {
 
 	scale := (256 * volMaxPercent) / (ym.nbVoice * 100)
 	idx := 0
+	const volumeTableSize = 256 * 64
+	if cap(ym.ymTrackerVolumeTable) < volumeTableSize {
+		ym.ymTrackerVolumeTable = make([]YmSample, volumeTableSize)
+	} else {
+		ym.ymTrackerVolumeTable = ym.ymTrackerVolumeTable[:volumeTableSize]
+	}
 
 	// Build volume table
 	for vol := 0; vol < 64; vol++ {
@@ -690,10 +694,7 @@ func (ym *CYmMusic) ymTrackerVoiceAdd(pVoice *YmTrackerVoice, pBuffer []YmSample
 }
 
 func (ym *CYmMusic) ymTrackerUpdate(pBuffer []YmSample, nbSample int) {
-	// Clear buffer
-	for i := 0; i < nbSample; i++ {
-		pBuffer[i] = 0
-	}
+	clear(pBuffer[:nbSample])
 
 	if ym.bMusicOver {
 		return

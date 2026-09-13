@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 )
 
 // PlaylistItem represents a single item in the playlist
@@ -65,7 +71,7 @@ func (p *Playlist) MoveDown(index int) error {
 
 // Clear removes all items from the playlist
 func (p *Playlist) Clear() {
-	p.Items = make([]*PlaylistItem, 0)
+	p.Items = nil
 }
 
 // Size returns the number of items in the playlist
@@ -96,12 +102,12 @@ func LoadPlaylist(filename string) (*Playlist, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var playlist Playlist
 	if err := json.Unmarshal(data, &playlist); err != nil {
 		return nil, err
 	}
-	
+
 	return &playlist, nil
 }
 
@@ -112,18 +118,18 @@ func (p *Playlist) SaveM3U(filename string) error {
 		return err
 	}
 	defer file.Close()
-	
+
 	// Write M3U header
 	fmt.Fprintln(file, "#EXTM3U")
 	fmt.Fprintf(file, "#PLAYLIST:%s\n", p.Name)
-	
+
 	// Write each item
 	for _, item := range p.Items {
 		duration := int(item.Duration / 1000) // Convert to seconds
 		fmt.Fprintf(file, "#EXTINF:%d,%s - %s\n", duration, item.Author, item.Title)
 		fmt.Fprintln(file, item.Path)
 	}
-	
+
 	return nil
 }
 
@@ -133,30 +139,26 @@ func LoadM3U(filename string) (*Playlist, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	playlist := NewPlaylist(filepath.Base(filename))
-	lines := string(data)
-	
-	// Simple M3U parser (could be improved)
-	// For now, just extract file paths
-	for _, line := range filepath.SplitList(lines) {
-		line = filepath.Clean(line)
-		if line == "" || line[0] == '#' {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		// Check if file exists and has .ym extension
-		if filepath.Ext(line) == ".ym" {
+		if strings.EqualFold(filepath.Ext(line), ".ym") {
 			item := &PlaylistItem{
-				Path:   line,
+				Path:   filepath.Clean(line),
 				Title:  filepath.Base(line),
 				Author: "Unknown",
 			}
 			playlist.Add(item)
 		}
 	}
-	
-	return playlist, nil
+	return playlist, scanner.Err()
 }
 
 // TotalDuration returns the total duration of all items in milliseconds
@@ -170,15 +172,9 @@ func (p *Playlist) TotalDuration() uint32 {
 
 // Shuffle randomizes the order of items in the playlist
 func (p *Playlist) Shuffle() {
-	// Simple Fisher-Yates shuffle
-	n := len(p.Items)
-	for i := n - 1; i > 0; i-- {
-		j := int(float64(i+1) * float64(os.Getpid()%1000) / 1000.0)
-		if j > i {
-			j = i
-		}
+	rand.Shuffle(len(p.Items), func(i, j int) {
 		p.Items[i], p.Items[j] = p.Items[j], p.Items[i]
-	}
+	})
 }
 
 // Sort sorts the playlist by a specific field
@@ -192,24 +188,18 @@ const (
 )
 
 func (p *Playlist) Sort(by SortBy) {
-	// Simple bubble sort (could use sort.Slice for better performance)
-	n := len(p.Items)
-	for i := 0; i < n-1; i++ {
-		for j := 0; j < n-i-1; j++ {
-			swap := false
-			switch by {
-			case SortByTitle:
-				swap = p.Items[j].Title > p.Items[j+1].Title
-			case SortByAuthor:
-				swap = p.Items[j].Author > p.Items[j+1].Author
-			case SortByDuration:
-				swap = p.Items[j].Duration > p.Items[j+1].Duration
-			case SortByPath:
-				swap = p.Items[j].Path > p.Items[j+1].Path
-			}
-			if swap {
-				p.Items[j], p.Items[j+1] = p.Items[j+1], p.Items[j]
-			}
-		}
+	var compare func(a, b *PlaylistItem) int
+	switch by {
+	case SortByTitle:
+		compare = func(a, b *PlaylistItem) int { return cmp.Compare(a.Title, b.Title) }
+	case SortByAuthor:
+		compare = func(a, b *PlaylistItem) int { return cmp.Compare(a.Author, b.Author) }
+	case SortByDuration:
+		compare = func(a, b *PlaylistItem) int { return cmp.Compare(a.Duration, b.Duration) }
+	case SortByPath:
+		compare = func(a, b *PlaylistItem) int { return cmp.Compare(a.Path, b.Path) }
+	default:
+		return
 	}
+	slices.SortStableFunc(p.Items, compare)
 }

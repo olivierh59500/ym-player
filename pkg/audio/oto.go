@@ -13,7 +13,6 @@ var (
 	// Global Oto context singleton
 	globalOtoMutex sync.Mutex
 	globalContext  *oto.Context
-	globalPlayers  int
 )
 
 // StreamingOtoOutput uses Oto v3 for cross-platform audio
@@ -25,8 +24,9 @@ type StreamingOtoOutput struct {
 	channels   int
 	bufferSize int
 	mu         sync.Mutex
+	writeMu    sync.Mutex
+	pcm        []byte
 	closed     bool
-	wg         sync.WaitGroup
 }
 
 // NewStreamingOtoOutput creates a new streaming Oto output
@@ -72,7 +72,6 @@ func (s *StreamingOtoOutput) Open(sampleRate, channels, bufferSize int) error {
 		<-ready
 		globalContext = context
 	}
-	globalPlayers++
 	context := globalContext
 	globalOtoMutex.Unlock()
 
@@ -80,12 +79,8 @@ func (s *StreamingOtoOutput) Open(sampleRate, channels, bufferSize int) error {
 	s.player = context.NewPlayer(s.reader)
 	s.closed = false
 
-	// Start playing in background
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.player.Play()
-	}()
+	// Play is non-blocking in Oto v3.
+	s.player.Play()
 
 	return nil
 }
@@ -122,18 +117,14 @@ func (s *StreamingOtoOutput) Close() error {
 		s.reader = nil
 	}
 
-	// Decrease player count
-	globalOtoMutex.Lock()
-	globalPlayers--
-	// Don't suspend context - keep it alive for reuse
-	globalOtoMutex.Unlock()
-
-	s.wg.Wait()
 	return nil
 }
 
 // Write writes samples to the stream
 func (s *StreamingOtoOutput) Write(samples []int16) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed || s.writer == nil {
 		s.mu.Unlock()
@@ -142,15 +133,10 @@ func (s *StreamingOtoOutput) Write(samples []int16) error {
 	writer := s.writer
 	s.mu.Unlock()
 
-	// Convert int16 to bytes (little-endian)
-	bytes := make([]byte, len(samples)*2)
-	for i, sample := range samples {
-		bytes[i*2] = byte(sample)
-		bytes[i*2+1] = byte(sample >> 8)
-	}
+	s.pcm = encodePCM16LE(s.pcm, samples)
 
 	// Write to pipe
-	_, err := writer.Write(bytes)
+	_, err := writer.Write(s.pcm)
 	return err
 }
 
@@ -198,10 +184,11 @@ func (f *FallbackOutput) Write(samples []int16) error {
 		return fmt.Errorf("output closed")
 	}
 	sampleRate := f.sampleRate
+	channels := f.channels
 	f.mu.Unlock()
 
 	// Calculate duration and sleep
-	duration := time.Duration(len(samples)) * time.Second / time.Duration(sampleRate)
+	duration := time.Duration(len(samples)) * time.Second / time.Duration(sampleRate*channels)
 	time.Sleep(duration)
 	return nil
 }

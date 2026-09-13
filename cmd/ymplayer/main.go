@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -73,7 +72,7 @@ func main() {
 
 	// Load YM file
 	fmt.Printf("Loading %s...\n", filepath.Base(ymFile))
-	if err := player.Load(ymFile); err != nil {
+	if err := player.LoadMemory(data); err != nil {
 		log.Fatalf("Failed to load YM file: %v", err)
 	}
 
@@ -213,7 +212,7 @@ func main() {
 }
 
 func createWAVOutput(filename string) (audio.Output, error) {
-	return NewWAVOutput(filename)
+	return audio.NewWAVOutput(filename), nil
 }
 
 func formatDuration(ms uint32) string {
@@ -238,10 +237,15 @@ func makeProgressBar(percent float64, width int) string {
 	return bar
 }
 
-// NullOutput discards all audio
-type NullOutput struct{}
+// NullOutput discards all audio while preserving real-time pacing.
+type NullOutput struct {
+	sampleRate int
+	channels   int
+}
 
 func (n *NullOutput) Open(sampleRate, channels, bufferSize int) error {
+	n.sampleRate = sampleRate
+	n.channels = channels
 	return nil
 }
 
@@ -251,108 +255,11 @@ func (n *NullOutput) Close() error {
 
 func (n *NullOutput) Write(samples []int16) error {
 	// Simulate write delay
-	duration := time.Duration(len(samples)) * time.Second / time.Duration(44100)
+	duration := time.Duration(len(samples)) * time.Second / time.Duration(n.sampleRate*n.channels)
 	time.Sleep(duration)
 	return nil
 }
 
 func (n *NullOutput) IsPlaying() bool {
 	return true
-}
-
-// WAVOutput writes audio to a WAV file
-type WAVOutput struct {
-	file       *os.File
-	filename   string
-	sampleRate int
-	channels   int
-	written    int64
-}
-
-func NewWAVOutput(filename string) (*WAVOutput, error) {
-	return &WAVOutput{
-		filename: filename,
-	}, nil
-}
-
-func (w *WAVOutput) Open(sampleRate, channels, bufferSize int) error {
-	w.sampleRate = sampleRate
-	w.channels = channels
-
-	file, err := os.Create(w.filename)
-	if err != nil {
-		return err
-	}
-
-	w.file = file
-
-	// Write WAV header (we'll update it later)
-	header := make([]byte, 44)
-	copy(header[0:4], []byte("RIFF"))
-	// File size - 8 (will be updated later)
-	binary.LittleEndian.PutUint32(header[4:8], 0)
-	copy(header[8:12], []byte("WAVE"))
-	copy(header[12:16], []byte("fmt "))
-	// Format chunk size
-	binary.LittleEndian.PutUint32(header[16:20], 16)
-	// Audio format (PCM)
-	binary.LittleEndian.PutUint16(header[20:22], 1)
-	// Number of channels
-	binary.LittleEndian.PutUint16(header[22:24], uint16(channels))
-	// Sample rate
-	binary.LittleEndian.PutUint32(header[24:28], uint32(sampleRate))
-	// Byte rate
-	byteRate := sampleRate * channels * 2
-	binary.LittleEndian.PutUint32(header[28:32], uint32(byteRate))
-	// Block align
-	blockAlign := channels * 2
-	binary.LittleEndian.PutUint16(header[32:34], uint16(blockAlign))
-	// Bits per sample
-	binary.LittleEndian.PutUint16(header[34:36], 16)
-	// Data chunk
-	copy(header[36:40], []byte("data"))
-	// Data size (will be updated later)
-	binary.LittleEndian.PutUint32(header[40:44], 0)
-
-	_, err = w.file.Write(header)
-	return err
-}
-
-func (w *WAVOutput) Close() error {
-	if w.file == nil {
-		return nil
-	}
-
-	// Update header with final size
-	w.file.Seek(4, 0)
-	fileSize := uint32(w.written + 36)
-	binary.Write(w.file, binary.LittleEndian, fileSize)
-
-	// Update data chunk size
-	w.file.Seek(40, 0)
-	dataSize := uint32(w.written)
-	binary.Write(w.file, binary.LittleEndian, dataSize)
-
-	return w.file.Close()
-}
-
-func (w *WAVOutput) Write(samples []int16) error {
-	if w.file == nil {
-		return fmt.Errorf("file not open")
-	}
-
-	// Convert samples to bytes
-	bytes := make([]byte, len(samples)*2)
-	for i, sample := range samples {
-		bytes[i*2] = byte(sample)
-		bytes[i*2+1] = byte(sample >> 8)
-	}
-
-	n, err := w.file.Write(bytes)
-	w.written += int64(n)
-	return err
-}
-
-func (w *WAVOutput) IsPlaying() bool {
-	return w.file != nil
 }

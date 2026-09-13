@@ -2,11 +2,9 @@ package stsound
 
 import (
 	"bytes"
-	//	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/olivierh59500/ym-player/pkg/lzh"
 )
@@ -47,13 +45,6 @@ func readBigEndian32(data []byte) YmU32 {
 	return YmU32(data[0])<<24 | YmU32(data[1])<<16 | YmU32(data[2])<<8 | YmU32(data[3])
 }
 
-func readBigEndian16(data []byte) YmU16 {
-	if len(data) < 2 {
-		return 0
-	}
-	return YmU16(data[0])<<8 | YmU16(data[1])
-}
-
 func readLittleEndian32(data []byte) YmU32 {
 	if len(data) < 4 {
 		return 0
@@ -61,36 +52,48 @@ func readLittleEndian32(data []byte) YmU32 {
 	return YmU32(data[0]) | YmU32(data[1])<<8 | YmU32(data[2])<<16 | YmU32(data[3])<<24
 }
 
-func readLittleEndian16(data []byte) YmU16 {
-	if len(data) < 2 {
-		return 0
+type ymDataReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *ymDataReader) take(size int) ([]byte, error) {
+	if size < 0 || size > len(r.data)-r.offset {
+		return nil, errors.New("unexpected end of YM data")
 	}
-	return YmU16(data[0]) | YmU16(data[1])<<8
+	data := r.data[r.offset : r.offset+size]
+	r.offset += size
+	return data, nil
 }
 
-// Lecture depuis un buffer avec big-endian (Motorola byte order)
-func readMotorolaDword(buf *bytes.Buffer) YmU32 {
-	data := make([]byte, 4)
-	buf.Read(data)
-	return readBigEndian32(data)
-}
-
-func readMotorolaWord(buf *bytes.Buffer) YmU16 {
-	data := make([]byte, 2)
-	buf.Read(data)
-	return readBigEndian16(data)
-}
-
-func readNtString(buf *bytes.Buffer) string {
-	var result []byte
-	for {
-		b, err := buf.ReadByte()
-		if err != nil || b == 0 {
-			break
-		}
-		result = append(result, b)
+func (r *ymDataReader) uint16() (YmU16, error) {
+	data, err := r.take(2)
+	if err != nil {
+		return 0, err
 	}
-	return string(result)
+	return YmU16(data[0])<<8 | YmU16(data[1]), nil
+}
+
+func (r *ymDataReader) uint32() (YmU32, error) {
+	data, err := r.take(4)
+	if err != nil {
+		return 0, err
+	}
+	return readBigEndian32(data), nil
+}
+
+func (r *ymDataReader) ntString() (string, error) {
+	data := r.data[r.offset:]
+	end := bytes.IndexByte(data, 0)
+	if end < 0 {
+		return "", errors.New("unterminated YM metadata")
+	}
+	r.offset += end + 1
+	return string(data[:end]), nil
+}
+
+func (r *ymDataReader) remaining() []byte {
+	return r.data[r.offset:]
 }
 
 func signeSample(data []YmU8) {
@@ -114,14 +117,15 @@ func (ym *CYmMusic) load(fileName string) error {
 	ym.fileSize = YmInt(len(data))
 
 	// Depack if necessary
-	depackedData, err := ym.depackFile(YmU32(len(data)))
+	depackedData, err := ym.depackFile()
 	if err != nil {
 		return err
 	}
 	ym.pBigMalloc = depackedData
+	ym.fileSize = YmInt(len(depackedData))
 
 	// Decode YM format
-	if err := ym.ymDecode(); err != nil {
+	if err := ym.ymDecode(false); err != nil {
 		return err
 	}
 
@@ -135,20 +139,23 @@ func (ym *CYmMusic) loadMemory(data []byte) error {
 	ym.stop()
 	ym.unLoad()
 
-	// Copy data
-	ym.pBigMalloc = make([]byte, len(data))
-	copy(ym.pBigMalloc, data)
+	// Decode directly from the caller's slice. deInterleave creates the owned
+	// playback stream for interleaved files; the uncommon planar case is cloned
+	// explicitly before returning.
+	compressed := lzh.IsLZHCompressed(data)
+	ym.pBigMalloc = data
 	ym.fileSize = YmInt(len(data))
 
 	// Depack if necessary
-	depackedData, err := ym.depackFile(YmU32(len(data)))
+	depackedData, err := ym.depackFile()
 	if err != nil {
 		return err
 	}
 	ym.pBigMalloc = depackedData
+	ym.fileSize = YmInt(len(depackedData))
 
 	// Decode YM format
-	if err := ym.ymDecode(); err != nil {
+	if err := ym.ymDecode(!compressed); err != nil {
 		return err
 	}
 
@@ -158,7 +165,7 @@ func (ym *CYmMusic) loadMemory(data []byte) error {
 	return nil
 }
 
-func (ym *CYmMusic) depackFile(checkOriginalSize YmU32) ([]byte, error) {
+func (ym *CYmMusic) depackFile() ([]byte, error) {
 	if len(ym.pBigMalloc) < 22 {
 		return ym.pBigMalloc, nil
 	}
@@ -176,20 +183,64 @@ func (ym *CYmMusic) depackFile(checkOriginalSize YmU32) ([]byte, error) {
 	return ym.pBigMalloc, nil
 }
 
-func (ym *CYmMusic) deInterleave() error {
+func (ym *CYmMusic) deInterleave(cloneStream bool) error {
 	if (ym.attrib & A_STREAMINTERLEAVED) == 0 {
+		if cloneStream {
+			ym.pDataStream = bytes.Clone(ym.pDataStream)
+			ym.pBigMalloc = ym.pDataStream
+		}
 		return nil
 	}
 
 	tmpBuff := make([]byte, ym.nbFrame*ym.streamInc)
 
-	// YM format stores data in a specific interleaved format
-	// We need to de-interleave it properly
-	for voice := 0; voice < ym.streamInc; voice++ {
-		srcOffset := voice * ym.nbFrame
-		for frame := 0; frame < ym.nbFrame; frame++ {
-			dstOffset := frame*ym.streamInc + voice
-			tmpBuff[dstOffset] = ym.pDataStream[srcOffset+frame]
+	// YM2/3 and YM5/6 have fixed register counts. Unrolling those two layouts
+	// avoids a multiplication and loop branch for every register in every frame.
+	n := ym.nbFrame
+	src := ym.pDataStream[:n*ym.streamInc]
+	switch ym.streamInc {
+	case 16:
+		for frame, dst := 0, 0; frame < n; frame, dst = frame+1, dst+16 {
+			tmpBuff[dst+0] = src[frame]
+			tmpBuff[dst+1] = src[n+frame]
+			tmpBuff[dst+2] = src[2*n+frame]
+			tmpBuff[dst+3] = src[3*n+frame]
+			tmpBuff[dst+4] = src[4*n+frame]
+			tmpBuff[dst+5] = src[5*n+frame]
+			tmpBuff[dst+6] = src[6*n+frame]
+			tmpBuff[dst+7] = src[7*n+frame]
+			tmpBuff[dst+8] = src[8*n+frame]
+			tmpBuff[dst+9] = src[9*n+frame]
+			tmpBuff[dst+10] = src[10*n+frame]
+			tmpBuff[dst+11] = src[11*n+frame]
+			tmpBuff[dst+12] = src[12*n+frame]
+			tmpBuff[dst+13] = src[13*n+frame]
+			tmpBuff[dst+14] = src[14*n+frame]
+			tmpBuff[dst+15] = src[15*n+frame]
+		}
+	case 14:
+		for frame, dst := 0, 0; frame < n; frame, dst = frame+1, dst+14 {
+			tmpBuff[dst+0] = src[frame]
+			tmpBuff[dst+1] = src[n+frame]
+			tmpBuff[dst+2] = src[2*n+frame]
+			tmpBuff[dst+3] = src[3*n+frame]
+			tmpBuff[dst+4] = src[4*n+frame]
+			tmpBuff[dst+5] = src[5*n+frame]
+			tmpBuff[dst+6] = src[6*n+frame]
+			tmpBuff[dst+7] = src[7*n+frame]
+			tmpBuff[dst+8] = src[8*n+frame]
+			tmpBuff[dst+9] = src[9*n+frame]
+			tmpBuff[dst+10] = src[10*n+frame]
+			tmpBuff[dst+11] = src[11*n+frame]
+			tmpBuff[dst+12] = src[12*n+frame]
+			tmpBuff[dst+13] = src[13*n+frame]
+		}
+	default:
+		for frame := 0; frame < n; frame++ {
+			dst := frame * ym.streamInc
+			for register := 0; register < ym.streamInc; register++ {
+				tmpBuff[dst+register] = src[register*n+frame]
+			}
 		}
 	}
 
@@ -200,7 +251,7 @@ func (ym *CYmMusic) deInterleave() error {
 	return nil
 }
 
-func (ym *CYmMusic) ymDecode() error {
+func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 	if len(ym.pBigMalloc) < 4 {
 		return errors.New("file too small")
 	}
@@ -210,6 +261,9 @@ func (ym *CYmMusic) ymDecode() error {
 
 	switch id {
 	case e_YM2a: // YM2!
+		if len(ym.pBigMalloc) < 4+14 {
+			return errors.New("truncated YM2 stream")
+		}
 		ym.songType = YM_V2
 		ym.nbFrame = int((ym.fileSize - 4) / 14)
 		ym.loopFrame = 0
@@ -226,6 +280,9 @@ func (ym *CYmMusic) ymDecode() error {
 		ym.pSongPlayer = "YM-Chip driver"
 
 	case e_YM3a: // YM3!
+		if len(ym.pBigMalloc) < 4+14 {
+			return errors.New("truncated YM3 stream")
+		}
 		ym.songType = YM_V3
 		ym.nbFrame = int((ym.fileSize - 4) / 14)
 		ym.loopFrame = 0
@@ -242,6 +299,9 @@ func (ym *CYmMusic) ymDecode() error {
 		ym.pSongPlayer = "YM-Chip driver"
 
 	case e_YM3b: // YM3b
+		if len(ym.pBigMalloc) < 4+14+4 {
+			return errors.New("truncated YM3b stream")
+		}
 		// YM3b stocke le loop frame à la fin en little-endian
 		pUD := ym.pBigMalloc[ym.fileSize-4:]
 		ym.songType = YM_V3
@@ -260,40 +320,70 @@ func (ym *CYmMusic) ymDecode() error {
 		ym.pSongPlayer = "YM-Chip driver"
 
 	case e_YM5a, e_YM6a: // YM5! or YM6!
-		// Vérifier la signature LeOnArD!
-		if !strings.HasPrefix(string(ym.pBigMalloc[4:12]), "LeOnArD!") {
+		if len(ym.pBigMalloc) < 12 || !bytes.Equal(ym.pBigMalloc[4:12], []byte("LeOnArD!")) {
 			return errors.New("not a valid YM format")
 		}
 
-		// YM5/6 utilise big-endian pour l'en-tête
-		buf := bytes.NewBuffer(ym.pBigMalloc[12:])
+		reader := ymDataReader{data: ym.pBigMalloc[12:]}
+		nbFrame, err := reader.uint32()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		attributes, err := reader.uint32()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		nbDrum, err := reader.uint16()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		clock, err := reader.uint32()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		playerRate, err := reader.uint16()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		loopFrame, err := reader.uint32()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		skip, err := reader.uint16()
+		if err != nil {
+			return fmt.Errorf("invalid YM5/6 header: %w", err)
+		}
+		if _, err := reader.take(int(skip)); err != nil {
+			return fmt.Errorf("invalid YM5/6 extra data: %w", err)
+		}
 
-		ym.nbFrame = int(readMotorolaDword(buf))
-		ym.setAttrib(YmInt(readMotorolaDword(buf)) | A_TIMECONTROL)
-		ym.nbDrum = int(readMotorolaWord(buf))
-		ym.ymChip.SetClock(readMotorolaDword(buf))
-		ym.setPlayerRate(int(readMotorolaWord(buf)))
-		ym.loopFrame = int(readMotorolaDword(buf))
-		skip := readMotorolaWord(buf)
-
-		// Skip additional data
-		buf.Next(int(skip))
+		ym.nbFrame = int(nbFrame)
+		ym.setAttrib(YmInt(attributes) | A_TIMECONTROL)
+		ym.nbDrum = int(nbDrum)
+		ym.ymChip.SetClock(clock)
+		ym.setPlayerRate(int(playerRate))
+		ym.loopFrame = int(loopFrame)
+		if ym.nbDrum > MAX_DIGIDRUM {
+			return fmt.Errorf("too many digidrums: %d", ym.nbDrum)
+		}
 
 		// Load drums if present
 		if ym.nbDrum > 0 {
 			ym.pDrumTab = make([]DigiDrum, ym.nbDrum)
 			for i := 0; i < ym.nbDrum; i++ {
-				// Drum size en big-endian
-				ym.pDrumTab[i].Size = readMotorolaDword(buf)
-				if ym.pDrumTab[i].Size > 0 {
-					// Allouer et lire les données
-					tmpData := make([]byte, ym.pDrumTab[i].Size)
-					buf.Read(tmpData)
-
-					// Convertir en YmU8
-					ym.pDrumTab[i].Data = make([]YmU8, len(tmpData))
-					for j := range tmpData {
-						ym.pDrumTab[i].Data[j] = YmU8(tmpData[j])
+				drumSize, err := reader.uint32()
+				if err != nil {
+					return fmt.Errorf("invalid digidrum %d: %w", i, err)
+				}
+				drumData, err := reader.take(int(drumSize))
+				if err != nil {
+					return fmt.Errorf("invalid digidrum %d: %w", i, err)
+				}
+				ym.pDrumTab[i].Size = drumSize
+				if drumSize > 0 {
+					ym.pDrumTab[i].Data = make([]YmU8, len(drumData))
+					for j, sample := range drumData {
+						ym.pDrumTab[i].Data[j] = YmU8(sample)
 					}
 
 					// Traiter les drums 4 bits si nécessaire
@@ -307,10 +397,18 @@ func (ym *CYmMusic) ymDecode() error {
 			ym.attrib &= ^A_DRUM4BITS
 		}
 
-		// Lire les métadonnées (null-terminated strings)
-		ym.pSongName = readNtString(buf)
-		ym.pSongAuthor = readNtString(buf)
-		ym.pSongComment = readNtString(buf)
+		ym.pSongName, err = reader.ntString()
+		if err != nil {
+			return fmt.Errorf("invalid song name: %w", err)
+		}
+		ym.pSongAuthor, err = reader.ntString()
+		if err != nil {
+			return fmt.Errorf("invalid song author: %w", err)
+		}
+		ym.pSongComment, err = reader.ntString()
+		if err != nil {
+			return fmt.Errorf("invalid song comment: %w", err)
+		}
 
 		if id == e_YM6a {
 			ym.songType = YM_V6
@@ -320,10 +418,9 @@ func (ym *CYmMusic) ymDecode() error {
 			ym.pSongType = "YM 5"
 		}
 
-		// Les données sont le reste du buffer
-		remaining := buf.Len()
-		ym.pDataStream = make([]byte, remaining)
-		buf.Read(ym.pDataStream)
+		// The buffer already points into pBigMalloc. Interleaved streams are
+		// copied once into their playback layout by deInterleave below.
+		ym.pDataStream = reader.remaining()
 		ym.streamInc = 16
 		ym.pSongPlayer = "YM-Chip driver"
 
@@ -338,5 +435,16 @@ func (ym *CYmMusic) ymDecode() error {
 		return fmt.Errorf("unknown YM format: %s (0x%08X)", idStr, id)
 	}
 
-	return ym.deInterleave()
+	if ym.nbFrame <= 0 {
+		return errors.New("YM stream contains no frames")
+	}
+	if ym.playerRate <= 0 {
+		return errors.New("YM player rate must be positive")
+	}
+	streamSize := uint64(ym.nbFrame) * uint64(ym.streamInc)
+	if streamSize > uint64(len(ym.pDataStream)) {
+		return fmt.Errorf("truncated YM register stream: got %d bytes, need %d", len(ym.pDataStream), streamSize)
+	}
+
+	return ym.deInterleave(cloneStream)
 }

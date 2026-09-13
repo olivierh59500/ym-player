@@ -2,7 +2,6 @@ package audio
 
 import (
 	"errors"
-	"reflect"
 	"sync"
 	"time"
 )
@@ -15,24 +14,30 @@ type Output interface {
 	IsPlaying() bool
 }
 
+// SampleComputer is implemented by stsound.StSound and keeps the audio loop
+// decoupled from the synthesizer without reflection in the real-time path.
+type SampleComputer interface {
+	Compute(buffer []int16, nbSamples int) bool
+}
+
 // Player wraps the YM player with audio output
 type Player struct {
-	stSound    interface{} // *stsound.StSound
+	stSound    SampleComputer
 	output     Output
 	sampleRate int
 	bufferSize int
 	playing    bool
 	paused     bool
+	started    bool
 	mu         sync.Mutex
-	done       chan bool
+	done       chan struct{}
 }
 
 // NewPlayer creates a new audio player
-func NewPlayer(stSound interface{}, output Output) *Player {
+func NewPlayer(stSound SampleComputer, output Output) *Player {
 	return &Player{
 		stSound: stSound,
 		output:  output,
-		done:    make(chan bool),
 	}
 }
 
@@ -40,40 +45,41 @@ func NewPlayer(stSound interface{}, output Output) *Player {
 func (p *Player) Start(sampleRate, bufferSize int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
-	if p.playing {
+
+	if p.started {
 		return errors.New("already playing")
 	}
-	
+
 	p.sampleRate = sampleRate
 	p.bufferSize = bufferSize
-	
+
 	// Open audio output
 	if err := p.output.Open(sampleRate, 1, bufferSize); err != nil {
 		return err
 	}
-	
+
 	p.playing = true
-	go p.audioLoop()
-	
+	p.paused = false
+	p.started = true
+	p.done = make(chan struct{})
+	go p.audioLoop(p.done)
+
 	return nil
 }
 
 // Stop stops audio playback
 func (p *Player) Stop() {
 	p.mu.Lock()
-	if !p.playing {
+	if !p.started {
 		p.mu.Unlock()
 		return
 	}
 	p.playing = false
+	done := p.done
 	p.mu.Unlock()
-	
+
 	// Wait for audio loop to finish
-	<-p.done
-	
-	// Close audio output
-	p.output.Close()
+	<-done
 }
 
 // Pause pauses playback
@@ -98,17 +104,18 @@ func (p *Player) IsPaused() bool {
 }
 
 // audioLoop is the main audio processing loop
-func (p *Player) audioLoop() {
+func (p *Player) audioLoop(done chan struct{}) {
 	defer func() {
-		p.done <- true
+		_ = p.output.Close()
+		p.mu.Lock()
+		p.playing = false
+		p.started = false
+		p.mu.Unlock()
+		close(done)
 	}()
-	
+
 	buffer := make([]int16, p.bufferSize)
-	
-	// Use reflection to call Compute method
-	// In real implementation, use proper type assertion
-	computeMethod := reflect.ValueOf(p.stSound).MethodByName("Compute")
-	
+
 	for {
 		p.mu.Lock()
 		if !p.playing {
@@ -117,29 +124,19 @@ func (p *Player) audioLoop() {
 		}
 		paused := p.paused
 		p.mu.Unlock()
-		
+
 		if paused {
 			// Write silence when paused
-			for i := range buffer {
-				buffer[i] = 0
-			}
+			clear(buffer)
 		} else {
-			// Compute next audio samples
-			args := []reflect.Value{
-				reflect.ValueOf(buffer),
-				reflect.ValueOf(len(buffer)),
-			}
-			result := computeMethod.Call(args)
-			
-			// Check if music is over
-			if !result[0].Bool() {
+			if !p.stSound.Compute(buffer, len(buffer)) {
 				p.mu.Lock()
 				p.playing = false
 				p.mu.Unlock()
 				break
 			}
 		}
-		
+
 		// Write to audio output
 		if err := p.output.Write(buffer); err != nil {
 			// Handle error
@@ -165,7 +162,7 @@ func NewBufferOutput() *BufferOutput {
 func (b *BufferOutput) Open(sampleRate, channels, bufferSize int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	b.sampleRate = sampleRate
 	b.channels = channels
 	b.buffer = make([]int16, 0, sampleRate*channels*10) // 10 seconds buffer
@@ -176,7 +173,7 @@ func (b *BufferOutput) Open(sampleRate, channels, bufferSize int) error {
 func (b *BufferOutput) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	b.buffer = nil
 	return nil
 }
@@ -185,11 +182,11 @@ func (b *BufferOutput) Close() error {
 func (b *BufferOutput) Write(samples []int16) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	if b.buffer == nil {
 		return errors.New("buffer not initialized")
 	}
-	
+
 	b.buffer = append(b.buffer, samples...)
 	return nil
 }
@@ -203,7 +200,7 @@ func (b *BufferOutput) IsPlaying() bool {
 func (b *BufferOutput) GetBuffer() []int16 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	result := make([]int16, len(b.buffer))
 	copy(result, b.buffer)
 	return result
@@ -213,6 +210,6 @@ func (b *BufferOutput) GetBuffer() []int16 {
 func (b *BufferOutput) Clear() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	
+
 	b.buffer = b.buffer[:0]
 }

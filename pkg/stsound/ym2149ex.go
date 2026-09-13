@@ -20,14 +20,42 @@ var (
 		env1100, env1101, env1110, env1111,
 	}
 
-	// Volume table - valeurs originales du YM2149
-	ymVolumeTable = []YmInt{
-		62, 161, 265, 377, 580, 774, 1155, 1575,
-		2260, 3088, 4570, 6233, 9330, 13187, 21220, 32767,
+	// Volume table from the original YM2149 implementation, with its /3
+	// normalization applied at compile time. Keeping it immutable also makes
+	// construction race-free.
+	ymVolumeTable = [16]YmInt{
+		20, 53, 88, 125, 193, 258, 385, 525,
+		753, 1029, 1523, 2077, 3110, 4395, 7073, 10922,
 	}
 
-	volumeTableInitialized = false
+	// Envelope curves are immutable and shared by all chip instances.
+	envelopeData = buildEnvelopeData()
 )
+
+func buildEnvelopeData() (data [16][2][32]YmU8) {
+	for env := 0; env < len(data); env++ {
+		pse := envWave[env]
+		pos := 0
+		for phase := 0; phase < 2; phase++ {
+			a := pse[phase*2]
+			b := pse[phase*2+1]
+			delta := b - a
+			a *= 15
+			for i := 0; i < 16; i++ {
+				value := a
+				a += delta
+				if value < 0 {
+					value = 0
+				} else if value > 15 {
+					value = 15
+				}
+				data[env][phase][pos] = YmU8(value)
+				pos++
+			}
+		}
+	}
+	return data
+}
 
 const DC_ADJUST_BUFFERLEN = 512
 
@@ -92,17 +120,17 @@ type CYm2149Ex struct {
 	envPos   YmU32
 	envPhase YmInt
 	envShape YmInt
-	envData  [16][2][32]YmU8  // 16 shapes, 2 phases (pas 4!), 32 steps
 
 	// Special effects
-	specialEffect [3]YmSpecialEffect
-	bSyncBuzzer   YmBool
-	syncBuzzerStep YmU32
+	specialEffect   [3]YmSpecialEffect
+	effectMask      YmU8
+	bSyncBuzzer     YmBool
+	syncBuzzerStep  YmU32
 	syncBuzzerPhase YmU32
 
 	// Filters
 	lowPassFilter [2]int
-	dcAdjust      *DcAdjuster
+	dcAdjust      DcAdjuster
 }
 
 // NewYm2149Ex creates a new YM2149 emulator
@@ -111,19 +139,7 @@ func NewYm2149Ex(masterClock YmU32, prediv YmInt, playRate YmU32) *CYm2149Ex {
 		bFilter:         YmTrue,
 		internalClock:   masterClock / YmU32(prediv),
 		replayFrequency: YmInt(playRate),
-		dcAdjust:        NewDcAdjuster(),
 	}
-
-	// Restaurer la division par 6 comme dans l'original
-	if !volumeTableInitialized && ymVolumeTable[15] == 32767 {
-		volumeTableInitialized = true
-		for i := range ymVolumeTable {
-			ymVolumeTable[i] = (ymVolumeTable[i] * 2) / 6
-		}
-	}
-
-	// Build envelope shapes
-	ym.initEnvelopeData()
 
 	// Set volume voice pointers
 	ym.pVolA = &ym.volA
@@ -136,43 +152,12 @@ func NewYm2149Ex(masterClock YmU32, prediv YmInt, playRate YmU32) *CYm2149Ex {
 	return ym
 }
 
-func (ym *CYm2149Ex) initEnvelopeData() {
-	// Exactement comme dans le C++
-	for env := 0; env < 16; env++ {
-		pse := envWave[env]
-		pEnv := 0
-		for phase := 0; phase < 4; phase++ {
-			a := pse[phase*2]
-			b := pse[phase*2+1]
-			d := b - a
-			a *= 15
-			for i := 0; i < 16; i++ {
-				val := a
-				a += d
-				if val < 0 {
-					val = 0
-				} else if val > 15 {
-					val = 15
-				}
-				// Phase 0 et 1 seulement (le C++ utilise 2 phases avec 32 positions)
-				if phase < 2 {
-					ym.envData[env][phase][pEnv] = YmU8(val)
-					pEnv++
-				}
-			}
-			if phase == 1 {
-				pEnv = 0  // Reset pour la phase suivante
-			}
-		}
-	}
-}
-
 func (ym *CYm2149Ex) SetClock(clock YmU32) {
 	ym.internalClock = clock
 }
 
 func (ym *CYm2149Ex) toneStepCompute(rHigh, rLow YmU8) YmU32 {
-	per := YmInt(rHigh&15)
+	per := YmInt(rHigh & 15)
 	per = (per << 8) + YmInt(rLow)
 	if per <= 5 {
 		return 0
@@ -245,6 +230,7 @@ func (ym *CYm2149Ex) Reset() {
 	for i := range ym.specialEffect {
 		ym.specialEffect[i] = YmSpecialEffect{}
 	}
+	ym.effectMask = 0
 
 	ym.SyncBuzzerStop()
 
@@ -283,6 +269,9 @@ func (ym *CYm2149Ex) sidVolumeCompute(voice YmInt, pVol *YmInt) {
 		pVoice.DrumPos += pVoice.DrumStep
 		if (pVoice.DrumPos >> DRUM_PREC) >= pVoice.DrumSize {
 			pVoice.Drum = YmFalse
+			if !pVoice.Sid {
+				ym.effectMask &^= 1 << voice
+			}
 		}
 	}
 }
@@ -303,12 +292,21 @@ func (ym *CYm2149Ex) nextSample() YmSample {
 	bn := ym.currentNoise
 
 	// Update envelope
-	ym.volE = ymVolumeTable[ym.envData[ym.envShape][ym.envPhase][ym.envPos>>(32-5)]]
+	ym.volE = ymVolumeTable[envelopeData[ym.envShape][ym.envPhase][ym.envPos>>(32-5)]]
 
-	// Update special effects
-	ym.sidVolumeCompute(0, &ym.volA)
-	ym.sidVolumeCompute(1, &ym.volB)
-	ym.sidVolumeCompute(2, &ym.volC)
+	// Most songs have no per-sample effects. Avoid three function calls and six
+	// flag checks on that overwhelmingly common path.
+	if ym.effectMask != 0 {
+		if ym.effectMask&1 != 0 {
+			ym.sidVolumeCompute(0, &ym.volA)
+		}
+		if ym.effectMask&2 != 0 {
+			ym.sidVolumeCompute(1, &ym.volB)
+		}
+		if ym.effectMask&4 != 0 {
+			ym.sidVolumeCompute(2, &ym.volC)
+		}
+	}
 
 	// Tone+noise+env+DAC for three voices!
 	signA := YmU32(YmS32(ym.posA) >> 31)
@@ -331,25 +329,35 @@ func (ym *CYm2149Ex) nextSample() YmSample {
 	ym.posC += ym.stepC
 	ym.noisePos += ym.noiseStep
 	ym.envPos += ym.envStep
-	
+
 	if ym.envPhase == 0 {
 		if ym.envPos < ym.envStep {
 			ym.envPhase = 1
 		}
 	}
 
-	// Sync buzzer
-	ym.syncBuzzerPhase += ym.syncBuzzerStep
-	if (ym.syncBuzzerPhase & (1 << 31)) != 0 {
-		ym.envPos = 0
-		ym.envPhase = 0
-		ym.syncBuzzerPhase &= 0x7fffffff
+	// Sync buzzer is uncommon; keep its accumulator off the normal path.
+	if ym.bSyncBuzzer {
+		ym.syncBuzzerPhase += ym.syncBuzzerStep
+		if (ym.syncBuzzerPhase & (1 << 31)) != 0 {
+			ym.envPos = 0
+			ym.envPhase = 0
+			ym.syncBuzzerPhase &= 0x7fffffff
+		}
 	}
 
-	// Update SID positions
-	ym.specialEffect[0].SidPos += ym.specialEffect[0].SidStep
-	ym.specialEffect[1].SidPos += ym.specialEffect[1].SidStep
-	ym.specialEffect[2].SidPos += ym.specialEffect[2].SidStep
+	// Only active SID voices need their phase advanced.
+	if ym.effectMask != 0 {
+		if ym.specialEffect[0].Sid {
+			ym.specialEffect[0].SidPos += ym.specialEffect[0].SidStep
+		}
+		if ym.specialEffect[1].Sid {
+			ym.specialEffect[1].SidPos += ym.specialEffect[1].SidStep
+		}
+		if ym.specialEffect[2].Sid {
+			ym.specialEffect[2].SidPos += ym.specialEffect[2].SidStep
+		}
+	}
 
 	// Normalize process
 	ym.dcAdjust.AddSample(vol)
@@ -497,9 +505,108 @@ func (ym *CYm2149Ex) WriteRegister(reg, data YmInt) {
 }
 
 func (ym *CYm2149Ex) Update(pSampleBuffer []YmSample, nbSample YmInt) {
+	if nbSample <= 0 {
+		return
+	}
+	if ym.effectMask == 0 && !ym.bSyncBuzzer {
+		ym.updateSimple(pSampleBuffer[:int(nbSample)])
+		return
+	}
 	for i := YmInt(0); i < nbSample; i++ {
 		pSampleBuffer[i] = ym.nextSample()
 	}
+}
+
+// updateSimple renders the normal tone/noise/envelope path with the chip state
+// held in locals. Register writes only happen between Update calls, so storing
+// the accumulators back once per block is equivalent and substantially reduces
+// memory traffic in the audio callback.
+func (ym *CYm2149Ex) updateSimple(buffer []YmSample) {
+	posA, posB, posC := ym.posA, ym.posB, ym.posC
+	stepA, stepB, stepC := ym.stepA, ym.stepB, ym.stepC
+	mixerTA, mixerTB, mixerTC := ym.mixerTA, ym.mixerTB, ym.mixerTC
+	mixerNA, mixerNB, mixerNC := ym.mixerNA, ym.mixerNB, ym.mixerNC
+
+	noisePos, noiseStep := ym.noisePos, ym.noiseStep
+	rndRack, currentNoise := ym.rndRack, ym.currentNoise
+	envPos, envStep := ym.envPos, ym.envStep
+	envPhase, envShape := ym.envPhase, ym.envShape
+	envelope := &envelopeData[envShape][envPhase]
+
+	fixedVolA, fixedVolB, fixedVolC := ym.volA, ym.volB, ym.volC
+	envA := ym.pVolA == &ym.volE
+	envB := ym.pVolB == &ym.volE
+	envC := ym.pVolC == &ym.volE
+	hasEnvelope := envA || envB || envC
+
+	dcPos, dcSum := ym.dcAdjust.pos, ym.dcAdjust.sum
+	filter0, filter1 := ym.lowPassFilter[0], ym.lowPassFilter[1]
+	filter := ym.bFilter
+
+	for i := range buffer {
+		if noisePos&0xffff0000 != 0 {
+			randomBit := (rndRack & 1) ^ ((rndRack >> 2) & 1)
+			rndRack = (rndRack >> 1) | (randomBit << 16)
+			if randomBit == 0 {
+				currentNoise ^= 0xffff
+			}
+			noisePos &= 0xffff
+		}
+
+		volumeA, volumeB, volumeC := fixedVolA, fixedVolB, fixedVolC
+		if hasEnvelope {
+			envelopeVolume := ymVolumeTable[envelope[envPos>>(32-5)]]
+			if envA {
+				volumeA = envelopeVolume
+			}
+			if envB {
+				volumeB = envelopeVolume
+			}
+			if envC {
+				volumeC = envelopeVolume
+			}
+		}
+
+		signA := YmU32(YmS32(posA) >> 31)
+		signB := YmU32(YmS32(posB) >> 31)
+		signC := YmU32(YmS32(posC) >> 31)
+		volume := (volumeA & YmInt((signA|mixerTA)&(currentNoise|mixerNA))) +
+			(volumeB & YmInt((signB|mixerTB)&(currentNoise|mixerNB))) +
+			(volumeC & YmInt((signC|mixerTC)&(currentNoise|mixerNC)))
+
+		posA += stepA
+		posB += stepB
+		posC += stepC
+		noisePos += noiseStep
+		envPos += envStep
+		if envPhase == 0 && envPos < envStep {
+			envPhase = 1
+			envelope = &envelopeData[envShape][envPhase]
+		}
+
+		dcSum += volume - ym.dcAdjust.buffer[dcPos]
+		ym.dcAdjust.buffer[dcPos] = volume
+		dcPos = (dcPos + 1) & (DC_ADJUST_BUFFERLEN - 1)
+		// Chip output is unipolar, so the rolling sum cannot be negative. An
+		// unsigned shift is exactly equivalent to division by 512 here and avoids
+		// signed-division rounding machinery in the innermost loop.
+		in := volume - YmInt(YmU32(dcSum)>>9)
+
+		if filter {
+			out := (filter0 >> 2) + (filter1 >> 1) + (int(in) >> 2)
+			filter0, filter1 = filter1, int(in)
+			buffer[i] = YmSample(out)
+		} else {
+			buffer[i] = YmSample(in)
+		}
+	}
+
+	ym.posA, ym.posB, ym.posC = posA, posB, posC
+	ym.noisePos, ym.rndRack, ym.currentNoise = noisePos, rndRack, currentNoise
+	ym.envPos, ym.envPhase = envPos, envPhase
+	ym.volE = ymVolumeTable[envelope[envPos>>(32-5)]]
+	ym.dcAdjust.pos, ym.dcAdjust.sum = dcPos, dcSum
+	ym.lowPassFilter[0], ym.lowPassFilter[1] = filter0, filter1
 }
 
 func (ym *CYm2149Ex) DrumStart(voice YmInt, pDrumBuffer []YmU8, drumSize YmU32, drumFreq YmInt) {
@@ -509,11 +616,15 @@ func (ym *CYm2149Ex) DrumStart(voice YmInt, pDrumBuffer []YmU8, drumSize YmU32, 
 		ym.specialEffect[voice].DrumSize = drumSize
 		ym.specialEffect[voice].DrumStep = YmU32((drumFreq << DRUM_PREC) / ym.replayFrequency)
 		ym.specialEffect[voice].Drum = YmTrue
+		ym.effectMask |= 1 << voice
 	}
 }
 
 func (ym *CYm2149Ex) DrumStop(voice YmInt) {
 	ym.specialEffect[voice].Drum = YmFalse
+	if !ym.specialEffect[voice].Sid {
+		ym.effectMask &^= 1 << voice
+	}
 }
 
 func (ym *CYm2149Ex) SidStart(voice, timerFreq, vol YmInt) {
@@ -522,10 +633,14 @@ func (ym *CYm2149Ex) SidStart(voice, timerFreq, vol YmInt) {
 	ym.specialEffect[voice].SidStep = tmp
 	ym.specialEffect[voice].SidVol = vol & 15
 	ym.specialEffect[voice].Sid = YmTrue
+	ym.effectMask |= 1 << voice
 }
 
 func (ym *CYm2149Ex) SidStop(voice YmInt) {
 	ym.specialEffect[voice].Sid = YmFalse
+	if !ym.specialEffect[voice].Drum {
+		ym.effectMask &^= 1 << voice
+	}
 }
 
 func (ym *CYm2149Ex) SyncBuzzerStart(timerFreq, envShape YmInt) {

@@ -2,19 +2,22 @@ package stsound
 
 // YmTypes - Basic types for multi-platform compilation
 type (
-	YmBool   bool
-	YmInt    int32
-	YmSample int16
-	YmU8     uint8
-	YmS8     int8
-	YmU16    uint16
-	YmS16    int16
-	YmU32    uint32
-	YmS32    int32
-	YmS64    int64
-	YmChar   byte
-	YmFloat  float32
+	YmBool  bool
+	YmInt   int32
+	YmU8    uint8
+	YmS8    int8
+	YmU16   uint16
+	YmS16   int16
+	YmU32   uint32
+	YmS32   int32
+	YmS64   int64
+	YmChar  byte
+	YmFloat float32
 )
+
+// YmSample is an alias so callers can render directly into ordinary int16 PCM
+// buffers without allocating and copying an intermediate slice.
+type YmSample = int16
 
 const (
 	YmFalse YmBool = false

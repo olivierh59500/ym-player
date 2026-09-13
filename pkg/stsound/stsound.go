@@ -39,16 +39,7 @@ func (s *StSound) LoadMemory(data []byte) error {
 
 // Compute renders audio samples
 func (s *StSound) Compute(buffer []int16, nbSamples int) bool {
-	// Créer un buffer temporaire pour les échantillons YM
-	ymBuffer := make([]YmSample, nbSamples)
-	result := s.music.Update(ymBuffer, nbSamples) == YmTrue
-
-	// Copier le résultat dans le buffer original sans amplification supplémentaire
-	for i := 0; i < nbSamples; i++ {
-		buffer[i] = int16(ymBuffer[i])
-	}
-
-	return result
+	return s.music.Update(buffer, nbSamples) == YmTrue
 }
 
 // SetLoopMode enables/disables loop mode

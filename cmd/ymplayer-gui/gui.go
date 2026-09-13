@@ -812,23 +812,34 @@ func (p *YMPlayerGUI) playbackLoop() {
 				return
 			} else {
 				// Stop at end
-				p.playing = false
 				p.mutex.Unlock()
 				p.stop()
 				break
 			}
 		}
 
-		// Apply volume
-		for i := range p.buffer {
-			p.buffer[i] = int16(float64(p.buffer[i]) * p.volume)
+		// Unity gain is the default and needs no per-sample work.
+		if p.volume != 1 {
+			for i := range p.buffer {
+				sample := float64(p.buffer[i]) * p.volume
+				if sample > 32767 {
+					p.buffer[i] = 32767
+				} else if sample < -32768 {
+					p.buffer[i] = -32768
+				} else {
+					p.buffer[i] = int16(sample)
+				}
+			}
 		}
 
+		audioOutput := p.audioOutput
 		p.mutex.Unlock()
 
 		// Write audio
-		if p.audioOutput != nil {
-			p.audioOutput.Write(p.buffer)
+		if audioOutput != nil {
+			if err := audioOutput.Write(p.buffer); err != nil {
+				log.Printf("Audio write error: %v", err)
+			}
 		}
 	}
 }
@@ -1071,7 +1082,7 @@ func (p *YMPlayerGUI) exportToWAV(filename string, progress dialog.Dialog) error
 	}
 
 	// Create WAV output
-	wavOut := &WAVOutput{filename: filename}
+	wavOut := audio.NewWAVOutput(filename)
 	if err := wavOut.Open(p.sampleRate, 1, p.bufferSize); err != nil {
 		return err
 	}
@@ -1086,7 +1097,9 @@ func (p *YMPlayerGUI) exportToWAV(filename string, progress dialog.Dialog) error
 	processed := 0
 
 	for exportPlayer.Compute(buffer, len(buffer)) {
-		wavOut.Write(buffer)
+		if err := wavOut.Write(buffer); err != nil {
+			return err
+		}
 		processed += len(buffer)
 
 		// Update progress
