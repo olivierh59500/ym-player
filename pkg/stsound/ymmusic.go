@@ -512,6 +512,7 @@ func (ym *CYmMusic) readNextBlockInfo() {
 }
 
 func (ym *CYmMusic) stDigitMix(pWrite16 []YmSample, nbs int) {
+	clear(pWrite16[:nbs])
 	if ym.bMusicOver {
 		return
 	}
@@ -587,7 +588,7 @@ func (ym *CYmMusic) ymTrackerDesInterleave() {
 	step := 4 * ym.nbVoice
 
 	for n1 := 0; n1 < step; n1++ {
-		srcIdx := n1
+		srcIdx := n1 * ym.nbFrame
 		dstIdx := n1
 		for n2 := 0; n2 < ym.nbFrame; n2++ {
 			pNewBuffer[dstIdx] = ym.pDataStream[srcIdx]
@@ -622,7 +623,7 @@ func (ym *CYmMusic) ymTrackerPlayer(pVoice []YmTrackerVoice) {
 			pVoice[i].SampleVolume = YmS32(line.Volume & 63)
 			pVoice[i].Loop = (line.Volume & 0x40) != 0
 
-			if line.NoteOn != 0xff {
+			if line.NoteOn != 0xff && int(line.NoteOn) < len(ym.pDrumTab) {
 				pVoice[i].Running = YmTrue
 				pVoice[i].Sample = ym.pDrumTab[line.NoteOn].Data
 				pVoice[i].SampleSize = ym.pDrumTab[line.NoteOn].Size
@@ -681,8 +682,8 @@ func (ym *CYmMusic) ymTrackerVoiceAdd(pVoice *YmTrackerVoice, pBuffer []YmSample
 
 		samplePos += sampleInc
 		if samplePos >= sampleEnd {
-			if pVoice.Loop {
-				samplePos -= repLen
+			if pVoice.Loop && repLen > 0 {
+				samplePos = sampleEnd - repLen + (samplePos-sampleEnd)%repLen
 			} else {
 				pVoice.Running = YmFalse
 				return

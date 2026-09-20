@@ -260,6 +260,10 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 	id := readBigEndian32(ym.pBigMalloc[:4])
 
 	switch id {
+	case e_YMT1, e_YMT2:
+		return ym.decodeTracker(id)
+	case e_MIX1:
+		return ym.decodeMix()
 	case e_YM2a: // YM2!
 		if len(ym.pBigMalloc) < 4+14 {
 			return errors.New("truncated YM2 stream")
