@@ -34,11 +34,15 @@ const (
 	YM_V5
 	YM_V6
 	YM_VMAX
+)
 
+const (
 	YM_TRACKER1 YmFileType = 32 + iota
 	YM_TRACKER2
 	YM_TRACKERMAX
+)
 
+const (
 	YM_MIX1 YmFileType = 64 + iota
 	YM_MIX2
 	YM_MIXMAX
@@ -103,7 +107,7 @@ type DigiDrum struct {
 type YmTrackerVoice struct {
 	Sample       []YmU8
 	SampleSize   YmU32
-	SamplePos    YmU32
+	SamplePos    uint64
 	RepLen       YmU32
 	SampleVolume YmS32
 	SampleFreq   YmU32
@@ -124,7 +128,7 @@ type YmSpecialEffect struct {
 	Drum     YmBool
 	DrumSize YmU32
 	DrumData []YmU8
-	DrumPos  YmU32
+	DrumPos  uint64
 	DrumStep YmU32
 
 	Sid     YmBool
@@ -137,5 +141,5 @@ type YmSpecialEffect struct {
 type TimeKey struct {
 	Time    YmU32
 	NRepeat YmU16
-	NBlock  YmU16
+	NBlock  YmU32
 }

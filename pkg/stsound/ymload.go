@@ -12,6 +12,13 @@ import (
 // MFP chip predivisor
 var mfpPrediv = []YmInt{0, 4, 10, 16, 50, 64, 100, 200}
 
+// DigiDrum amplitudes use the full DAC range. The chip's mixer table has a
+// separate three-channel scaling and must not be reused for sample conversion.
+var digidrumVolumeTable = [16]YmU16{
+	62, 161, 265, 377, 580, 774, 1155, 1575,
+	2260, 3088, 4570, 6233, 9330, 13187, 21220, 32767,
+}
+
 // LZH Header structure
 type LzhHeader struct {
 	Size       YmU8
@@ -24,7 +31,7 @@ type LzhHeader struct {
 	NameLength YmU8
 }
 
-// File ID constants - ces valeurs sont en big-endian
+// File IDs are stored in big-endian order.
 const (
 	e_YM2a = YmU32(0x594D3221) // 'YM2!'
 	e_YM3a = YmU32(0x594D3321) // 'YM3!'
@@ -37,7 +44,7 @@ const (
 	e_YMT2 = YmU32(0x594D5432) // 'YMT2'
 )
 
-// Fonctions de lecture avec endianness explicite
+// Header readers use the explicit byte order required by each format.
 func readBigEndian32(data []byte) YmU32 {
 	if len(data) < 4 {
 		return 0
@@ -103,9 +110,15 @@ func signeSample(data []YmU8) {
 }
 
 // Load functions
-func (ym *CYmMusic) load(fileName string) error {
+func (ym *CYmMusic) load(fileName string) (err error) {
 	ym.stop()
 	ym.unLoad()
+	defer func() {
+		if err != nil {
+			ym.lastError = err.Error()
+			ym.clearFailedLoad()
+		}
+	}()
 
 	// Read file
 	data, err := os.ReadFile(fileName)
@@ -130,14 +143,21 @@ func (ym *CYmMusic) load(fileName string) error {
 	}
 
 	ym.ymChip.Reset()
+	ym.lastError = ""
 	ym.bMusicOk = YmTrue
 	ym.bPause = YmFalse
 	return nil
 }
 
-func (ym *CYmMusic) loadMemory(data []byte) error {
+func (ym *CYmMusic) loadMemory(data []byte) (err error) {
 	ym.stop()
 	ym.unLoad()
+	defer func() {
+		if err != nil {
+			ym.lastError = err.Error()
+			ym.clearFailedLoad()
+		}
+	}()
 
 	// Decode directly from the caller's slice. deInterleave creates the owned
 	// playback stream for interleaved files; the uncommon planar case is cloned
@@ -160,9 +180,18 @@ func (ym *CYmMusic) loadMemory(data []byte) error {
 	}
 
 	ym.ymChip.Reset()
+	ym.lastError = ""
 	ym.bMusicOk = YmTrue
 	ym.bPause = YmFalse
 	return nil
+}
+
+// clearFailedLoad removes parsed metadata and partially allocated samples when
+// decoding fails, so a failed replacement never exposes stale song information.
+func (ym *CYmMusic) clearFailedLoad() {
+	ym.unLoad()
+	ym.nbFrame, ym.loopFrame, ym.nbDrum, ym.nbVoice, ym.nbMixBlock = 0, 0, 0, 0, 0
+	ym.attrib, ym.playerRate, ym.streamInc, ym.fileSize = 0, 0, 0, 0
 }
 
 func (ym *CYmMusic) depackFile() ([]byte, error) {
@@ -306,10 +335,10 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 		if len(ym.pBigMalloc) < 4+14+4 {
 			return errors.New("truncated YM3b stream")
 		}
-		// YM3b stocke le loop frame à la fin en little-endian
+		// YM3b stores its final loop-frame value in little-endian order.
 		pUD := ym.pBigMalloc[ym.fileSize-4:]
 		ym.songType = YM_V3
-		ym.nbFrame = int((ym.fileSize - 4) / 14)
+		ym.nbFrame = int((ym.fileSize - 8) / 14)
 		ym.loopFrame = int(readLittleEndian32(pUD))
 		ym.ymChip.SetClock(ATARI_CLOCK)
 		ym.setPlayerRate(50)
@@ -361,15 +390,18 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 			return fmt.Errorf("invalid YM5/6 extra data: %w", err)
 		}
 
+		if clock == 0 {
+			return errors.New("YM chip clock must be positive")
+		}
+		if uint64(nbDrum)*4 > uint64(len(reader.remaining())) {
+			return errors.New("truncated YM digidrum table")
+		}
 		ym.nbFrame = int(nbFrame)
 		ym.setAttrib(YmInt(attributes) | A_TIMECONTROL)
 		ym.nbDrum = int(nbDrum)
 		ym.ymChip.SetClock(clock)
 		ym.setPlayerRate(int(playerRate))
 		ym.loopFrame = int(loopFrame)
-		if ym.nbDrum > MAX_DIGIDRUM {
-			return fmt.Errorf("too many digidrums: %d", ym.nbDrum)
-		}
 
 		// Load drums if present
 		if ym.nbDrum > 0 {
@@ -390,10 +422,10 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 						ym.pDrumTab[i].Data[j] = YmU8(sample)
 					}
 
-					// Traiter les drums 4 bits si nécessaire
+					// Expand four-bit volume samples through the YM amplitude table.
 					if (ym.attrib & A_DRUM4BITS) != 0 {
 						for j := range ym.pDrumTab[i].Data {
-							ym.pDrumTab[i].Data[j] = YmU8(ymVolumeTable[ym.pDrumTab[i].Data[j]&15] >> 7)
+							ym.pDrumTab[i].Data[j] = YmU8(digidrumVolumeTable[ym.pDrumTab[i].Data[j]&15] >> 7)
 						}
 					}
 				}
@@ -429,12 +461,11 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 		ym.pSongPlayer = "YM-Chip driver"
 
 	case e_YM4a: // YM4!
-		// YM4 est similaire à YM3 mais sans support pour l'instant
-		return errors.New("YM4 format not yet supported")
+		// The reference ST-Sound library also discontinued YM4 support.
+		return errors.New("YM4 format is unsupported; use YM5 or YM6")
 
 	default:
-		// Vérifier si c'est peut-être un format avec un ID différent
-		// Essayer de lire comme string pour debug
+		// Include the signature to identify unknown file variants.
 		idStr := string(ym.pBigMalloc[:4])
 		return fmt.Errorf("unknown YM format: %s (0x%08X)", idStr, id)
 	}
@@ -442,13 +473,19 @@ func (ym *CYmMusic) ymDecode(cloneStream bool) error {
 	if ym.nbFrame <= 0 {
 		return errors.New("YM stream contains no frames")
 	}
-	if ym.playerRate <= 0 {
-		return errors.New("YM player rate must be positive")
+	if ym.playerRate <= 0 || int(ym.playerRate) > ym.replayRate {
+		return errors.New("YM player rate must be positive and not exceed the output sample rate")
+	}
+	if ym.loopFrame < 0 || ym.loopFrame >= ym.nbFrame {
+		// Several authentic songs have stale loop metadata. Their first pass
+		// is valid; restart at frame zero instead of rejecting or overreading.
+		ym.loopFrame = 0
 	}
 	streamSize := uint64(ym.nbFrame) * uint64(ym.streamInc)
 	if streamSize > uint64(len(ym.pDataStream)) {
 		return fmt.Errorf("truncated YM register stream: got %d bytes, need %d", len(ym.pDataStream), streamSize)
 	}
 
+	ym.pDataStream = ym.pDataStream[:int(streamSize)]
 	return ym.deInterleave(cloneStream)
 }

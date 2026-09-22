@@ -46,7 +46,7 @@ func TestDecompressRejectsMalformedDataWithoutPanic(t *testing.T) {
 
 func TestDecompressLH0(t *testing.T) {
 	payload := []byte("YM3!uncompressed")
-	const headerSize = 20
+	const headerSize = 22
 	archive := make([]byte, headerSize+2+len(payload))
 	archive[0] = headerSize
 	copy(archive[2:7], "-lh0-")

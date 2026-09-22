@@ -38,15 +38,15 @@ type CYmMusic struct {
 	mixPos              int
 	pBigSampleBuffer    []byte
 	pCurrentMixSample   []byte
-	currentSampleLength YmU32
-	currentPente        YmU32
-	currentPos          YmU32
+	currentSampleLength uint64
+	currentPente        uint64
+	currentPos          uint64
 
 	// Time info
 	nbTimeKey               int
 	pTimeInfo               []TimeKey
 	musicLenInMs            YmU32
-	iMusicPosAccurateSample YmU32
+	iMusicPosAccurateSample uint64
 	iMusicPosInMs           YmU32
 
 	// Tracker-specific
@@ -91,6 +91,10 @@ func (ym *CYmMusic) IsSeekable() YmBool {
 }
 
 func (ym *CYmMusic) Update(pBuffer []YmSample, nbSample int) YmBool {
+	if nbSample < 0 || nbSample > len(pBuffer) {
+		ym.lastError = "sample count exceeds output buffer"
+		return YmFalse
+	}
 	if !ym.bMusicOk || ym.bPause || ym.bMusicOver {
 		ym.bufferClear(pBuffer, nbSample)
 		if ym.bMusicOver {
@@ -109,22 +113,25 @@ func (ym *CYmMusic) Update(pBuffer []YmSample, nbSample int) YmBool {
 		vblNbSample := ym.replayRate / int(ym.playerRate)
 
 		for nbs > 0 {
-			sampleToCompute := vblNbSample - ym.innerSamplePos
-			if sampleToCompute > nbs {
-				sampleToCompute = nbs
-			}
-
-			ym.innerSamplePos += sampleToCompute
-			if ym.innerSamplePos >= vblNbSample {
+			// Apply the frame before its first sample, independently of the
+			// caller's buffer size. ST-Sound's full-frame rendering is preserved.
+			if ym.innerSamplePos == 0 {
 				ym.player()
-				ym.innerSamplePos -= vblNbSample
+				if ym.bMusicOver {
+					clear(pOut[:nbs])
+					break
+				}
 			}
-
-			if sampleToCompute > 0 {
-				ym.ymChip.Update(pOut[:sampleToCompute], YmInt(sampleToCompute))
-				pOut = pOut[sampleToCompute:]
-			}
+			sampleToCompute := min(vblNbSample-ym.innerSamplePos, nbs)
+			ym.ymChip.Update(pOut[:sampleToCompute], YmInt(sampleToCompute))
+			pOut = pOut[sampleToCompute:]
 			nbs -= sampleToCompute
+			ym.innerSamplePos = (ym.innerSamplePos + sampleToCompute) % vblNbSample
+			if ym.innerSamplePos == 0 && ym.currentFrame == ym.nbFrame && !ym.bLoop {
+				ym.bMusicOver = YmTrue
+				clear(pOut[:nbs])
+				break
+			}
 		}
 	}
 
@@ -135,7 +142,14 @@ func (ym *CYmMusic) GetPos() YmU32 {
 	if ym.songType >= YM_MIX1 && ym.songType < YM_MIXMAX {
 		return ym.iMusicPosInMs
 	} else if ym.nbFrame > 0 && ym.playerRate > 0 {
-		return YmU32(ym.currentFrame) * 1000 / YmU32(ym.playerRate)
+		frameSamples := ym.replayRate / int(ym.playerRate)
+		samples := uint64(ym.currentFrame) * uint64(frameSamples)
+		if ym.songType >= YM_TRACKER1 {
+			samples -= uint64(ym.ymTrackerNbSampleBefore)
+		} else if ym.innerSamplePos != 0 {
+			samples -= uint64(frameSamples - ym.innerSamplePos)
+		}
+		return YmU32(samples * 1000 / uint64(ym.replayRate))
 	}
 	return 0
 }
@@ -144,7 +158,7 @@ func (ym *CYmMusic) GetMusicTime() YmU32 {
 	if ym.songType >= YM_MIX1 && ym.songType < YM_MIXMAX {
 		return ym.musicLenInMs
 	} else if ym.nbFrame > 0 && ym.playerRate > 0 {
-		return YmU32(ym.nbFrame) * 1000 / YmU32(ym.playerRate)
+		return YmU32(uint64(ym.nbFrame) * 1000 / uint64(ym.playerRate))
 	}
 	return 0
 }
@@ -155,26 +169,32 @@ func (ym *CYmMusic) SetMusicTime(time YmU32) YmU32 {
 	}
 
 	newTime := time
-	if ym.songType >= YM_V2 && ym.songType < YM_VMAX {
-		if newTime >= ym.GetMusicTime() {
-			newTime = 0
-		}
-		ym.currentFrame = int(newTime * YmU32(ym.playerRate) / 1000)
-	} else if ym.songType >= YM_TRACKER1 && ym.songType < YM_TRACKERMAX {
-		if newTime >= ym.GetMusicTime() {
-			newTime = 0
-		}
-		ym.currentFrame = int(newTime * YmU32(ym.playerRate) / 1000)
-	} else if ym.songType >= YM_MIX1 && ym.songType < YM_MIXMAX {
-		ym.setMixTime(time)
+	if newTime >= ym.GetMusicTime() {
+		newTime = 0
 	}
-
+	ym.resetPlayback()
+	if ym.songType >= YM_MIX1 && ym.songType < YM_MIXMAX {
+		ym.setMixTime(newTime)
+	} else {
+		// Replay preceding frames to reconstruct held notes, oscillator phases,
+		// envelopes and effects. Jumping the stream pointer loses that state.
+		frame := uint64(newTime) * uint64(ym.playerRate) / 1000
+		remaining := frame * uint64(ym.replayRate/int(ym.playerRate))
+		paused := ym.bPause
+		ym.bPause = YmFalse
+		var scratch [4096]YmSample
+		for remaining > 0 {
+			n := int(min(remaining, uint64(len(scratch))))
+			ym.Update(scratch[:n], n)
+			remaining -= uint64(n)
+		}
+		ym.bPause = paused
+	}
 	return newTime
 }
 
 func (ym *CYmMusic) Restart() {
-	ym.SetMusicTime(0)
-	ym.bMusicOver = YmFalse
+	ym.resetPlayback()
 }
 
 func (ym *CYmMusic) Play() {
@@ -246,29 +266,33 @@ func (ym *CYmMusic) bufferClear(pBuffer []YmSample, nbSample int) {
 }
 
 func (ym *CYmMusic) unLoad() {
-	ym.bMusicOk = YmFalse
-	ym.bPause = YmTrue
-	ym.bMusicOver = YmFalse
-	ym.pSongName = ""
-	ym.pSongAuthor = ""
-	ym.pSongComment = ""
-	ym.pSongType = ""
-	ym.pSongPlayer = ""
-	ym.pBigMalloc = nil
-	ym.pDataStream = nil
-	ym.pDrumTab = nil
-	ym.pBigSampleBuffer = nil
-	ym.pMixBlock = nil
-	ym.pTimeInfo = nil
-	ym.nbDrum = 0
+	// Preserve output configuration and the caller's loop preference only.
+	chip, rate, loop, lastError := ym.ymChip, ym.replayRate, ym.bLoop, ym.lastError
+	*ym = CYmMusic{ymChip: chip, replayRate: rate, bLoop: loop,
+		lastError: lastError, bPause: YmTrue, mixPos: -1}
+	chip.Reset()
 }
 
-func (ym *CYmMusic) stop() {
-	ym.bPause = YmTrue
+// resetPlayback also clears interpolation and chip history, so restarting is
+// equivalent to loading a fresh player at the same output settings.
+func (ym *CYmMusic) resetPlayback() {
+	ym.ymChip.Reset()
 	ym.currentFrame = 0
+	ym.innerSamplePos = 0
+	ym.bMusicOver = YmFalse
 	ym.iMusicPosInMs = 0
 	ym.iMusicPosAccurateSample = 0
 	ym.mixPos = -1
+	ym.nbRepeat = 0
+	ym.pCurrentMixSample = nil
+	ym.currentSampleLength, ym.currentPente, ym.currentPos = 0, 0, 0
+	ym.ymTrackerNbSampleBefore = 0
+	ym.ymTrackerVoice = [MAX_VOICE]YmTrackerVoice{}
+}
+
+func (ym *CYmMusic) stop() {
+	ym.resetPlayback()
+	ym.bPause = YmTrue
 }
 
 func (ym *CYmMusic) play() {
@@ -323,6 +347,7 @@ func (ym *CYmMusic) player() {
 			ym.ymChip.WriteRegister(13, 10)
 		}
 		if (data[10] & 0x80) != 0 {
+			ym.ymChip.WriteRegister(7, ym.ymChip.ReadRegister(7)|0x24)
 			sampleNum := data[10] & 0x7f
 			if data[12] != 0 {
 				sampleFrq := MFP_CLOCK / YmInt(data[12])
@@ -401,7 +426,7 @@ func (ym *CYmMusic) readYm6Effect(pReg []byte, code, prediv, count int) {
 				if (effectCode & 0xc0) == 0x00 {
 					ym.ymChip.SidStart(YmInt(voice), tmpFreq, YmInt(pReg[voice+8]&15))
 				}
-				// TODO: Implement SidSinStart for 0x80
+				// Sinus-SID is also a no-op in the supplied ST-Sound engine.
 			}
 
 		case 0x40: // DigiDrum
@@ -431,7 +456,7 @@ func (ym *CYmMusic) readYm6Effect(pReg []byte, code, prediv, count int) {
 
 // Mix-specific methods
 func (ym *CYmMusic) setMixTime(time YmU32) {
-	if time > ym.musicLenInMs {
+	if time == 0 || time > ym.musicLenInMs {
 		return
 	}
 
@@ -446,11 +471,11 @@ func (ym *CYmMusic) setMixTime(time YmU32) {
 		if time >= ym.pTimeInfo[i].Time && time < tEnd {
 			ym.mixPos = int(ym.pTimeInfo[i].NBlock)
 			ym.pCurrentMixSample = ym.pBigSampleBuffer[ym.pMixBlock[ym.mixPos].SampleStart:]
-			ym.currentSampleLength = ym.pMixBlock[ym.mixPos].SampleLength << 12
-			ym.currentPente = (YmU32(ym.pMixBlock[ym.mixPos].ReplayFreq) << 12) / YmU32(ym.replayRate)
+			ym.currentSampleLength = uint64(ym.pMixBlock[ym.mixPos].SampleLength) << 12
+			ym.currentPente = (uint64(ym.pMixBlock[ym.mixPos].ReplayFreq) << 12) / uint64(ym.replayRate)
 
 			len := tEnd - ym.pTimeInfo[i].Time
-			t0 := ((time - ym.pTimeInfo[i].Time) * ym.pMixBlock[ym.mixPos].SampleLength) / len
+			t0 := (uint64(time-ym.pTimeInfo[i].Time) * uint64(ym.pMixBlock[ym.mixPos].SampleLength)) / uint64(len)
 
 			ym.currentPos = t0 << 12
 			ym.nbRepeat = int(ym.pTimeInfo[i].NRepeat)
@@ -481,10 +506,10 @@ func (ym *CYmMusic) computeTimeInfo() {
 		for j := YmU16(0); j < ym.pMixBlock[i].NbRepeat; j++ {
 			ym.pTimeInfo[keyIdx].Time = time
 			ym.pTimeInfo[keyIdx].NRepeat = ym.pMixBlock[i].NbRepeat - j
-			ym.pTimeInfo[keyIdx].NBlock = YmU16(i)
+			ym.pTimeInfo[keyIdx].NBlock = YmU32(i)
 			keyIdx++
 
-			time += (ym.pMixBlock[i].SampleLength * 1000) / YmU32(ym.pMixBlock[i].ReplayFreq)
+			time += YmU32(uint64(ym.pMixBlock[i].SampleLength) * 1000 / uint64(ym.pMixBlock[i].ReplayFreq))
 		}
 	}
 	ym.musicLenInMs = time
@@ -498,6 +523,8 @@ func (ym *CYmMusic) readNextBlockInfo() {
 			ym.mixPos = 0
 			if !ym.bLoop {
 				ym.bMusicOver = YmTrue
+				ym.iMusicPosInMs = ym.musicLenInMs
+				return
 			}
 			ym.iMusicPosAccurateSample = 0
 			ym.iMusicPosInMs = 0
@@ -506,8 +533,8 @@ func (ym *CYmMusic) readNextBlockInfo() {
 	}
 
 	ym.pCurrentMixSample = ym.pBigSampleBuffer[ym.pMixBlock[ym.mixPos].SampleStart:]
-	ym.currentSampleLength = ym.pMixBlock[ym.mixPos].SampleLength << 12
-	ym.currentPente = (YmU32(ym.pMixBlock[ym.mixPos].ReplayFreq) << 12) / YmU32(ym.replayRate)
+	ym.currentSampleLength = uint64(ym.pMixBlock[ym.mixPos].SampleLength) << 12
+	ym.currentPente = (uint64(ym.pMixBlock[ym.mixPos].ReplayFreq) << 12) / uint64(ym.replayRate)
 	ym.currentPos &= (1 << 12) - 1
 }
 
@@ -522,10 +549,6 @@ func (ym *CYmMusic) stDigitMix(pWrite16 []YmSample, nbs int) {
 		ym.readNextBlockInfo()
 	}
 
-	ym.iMusicPosAccurateSample += YmU32(nbs * 1000)
-	ym.iMusicPosInMs += ym.iMusicPosAccurateSample / YmU32(ym.replayRate)
-	ym.iMusicPosAccurateSample %= YmU32(ym.replayRate)
-
 	for i := 0; i < nbs; i++ {
 		sa := YmInt(YmSample(ym.pCurrentMixSample[ym.currentPos>>12]) << 8)
 
@@ -539,6 +562,9 @@ func (ym *CYmMusic) stDigitMix(pWrite16 []YmSample, nbs int) {
 
 		pWrite16[i] = YmSample(sa)
 
+		ym.iMusicPosAccurateSample += 1000
+		ym.iMusicPosInMs += YmU32(ym.iMusicPosAccurateSample / uint64(ym.replayRate))
+		ym.iMusicPosAccurateSample %= uint64(ym.replayRate)
 		ym.currentPos += ym.currentPente
 		if ym.currentPos >= ym.currentSampleLength {
 			ym.readNextBlockInfo()
@@ -602,6 +628,13 @@ func (ym *CYmMusic) ymTrackerDesInterleave() {
 }
 
 func (ym *CYmMusic) ymTrackerPlayer(pVoice []YmTrackerVoice) {
+	if ym.currentFrame >= ym.nbFrame {
+		if !ym.bLoop {
+			ym.bMusicOver = YmTrue
+			return
+		}
+		ym.currentFrame = ym.loopFrame
+	}
 	lineSize := 4 // sizeof(YmTrackerLine)
 	offset := ym.currentFrame * ym.nbVoice * lineSize
 
@@ -636,12 +669,6 @@ func (ym *CYmMusic) ymTrackerPlayer(pVoice []YmTrackerVoice) {
 	}
 
 	ym.currentFrame++
-	if ym.currentFrame >= ym.nbFrame {
-		if !ym.bLoop {
-			ym.bMusicOver = YmTrue
-		}
-		ym.currentFrame = 0
-	}
 }
 
 func (ym *CYmMusic) ymTrackerVoiceAdd(pVoice *YmTrackerVoice, pBuffer []YmSample, nbs int) {
@@ -652,14 +679,13 @@ func (ym *CYmMusic) ymTrackerVoiceAdd(pVoice *YmTrackerVoice, pBuffer []YmSample
 	pVolumeTab := ym.ymTrackerVolumeTable[256*(pVoice.SampleVolume&63):]
 	samplePos := pVoice.SamplePos
 
-	step := float64(pVoice.SampleFreq<<YMTPREC) * float64(YmU32(1)<<YmU32(ym.ymTrackerFreqShift)) / float64(ym.replayRate)
-	sampleInc := YmU32(step)
+	sampleInc := (uint64(pVoice.SampleFreq) << (YMTPREC + ym.ymTrackerFreqShift)) / uint64(ym.replayRate)
 
-	sampleEnd := pVoice.SampleSize << YMTPREC
-	repLen := pVoice.RepLen << YMTPREC
+	sampleEnd := uint64(pVoice.SampleSize) << YMTPREC
+	repLen := uint64(pVoice.RepLen) << YMTPREC
 
 	for i := 0; i < nbs; i++ {
-		if samplePos>>YMTPREC >= YmU32(len(pVoice.Sample)) {
+		if samplePos>>YMTPREC >= uint64(len(pVoice.Sample)) {
 			pVoice.Running = YmFalse
 			return
 		}
@@ -670,7 +696,7 @@ func (ym *CYmMusic) ymTrackerVoiceAdd(pVoice *YmTrackerVoice, pBuffer []YmSample
 		vb := va
 		if samplePos < (sampleEnd - (1 << YMTPREC)) {
 			nextIdx := (samplePos >> YMTPREC) + 1
-			if nextIdx < YmU32(len(pVoice.Sample)) {
+			if nextIdx < uint64(len(pVoice.Sample)) {
 				vb = YmInt(pVolumeTab[pVoice.Sample[nextIdx]])
 			}
 		}
@@ -726,6 +752,10 @@ func (ym *CYmMusic) ymTrackerUpdate(pBuffer []YmSample, nbSample int) {
 			}
 			bufIdx += nbs
 			remaining -= nbs
+		}
+		if ym.ymTrackerNbSampleBefore == 0 && ym.currentFrame == ym.nbFrame && !ym.bLoop {
+			ym.bMusicOver = YmTrue
+			return
 		}
 	}
 }

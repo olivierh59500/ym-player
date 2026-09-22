@@ -18,9 +18,8 @@ func testSongPath(parts ...string) string {
 	return filepath.Join(path...)
 }
 
-// TestBundledCorpus exercises every fixture shipped with the project. Sixteen
-// legacy files are known to be corrupt, so keep the accepted-file count as the
-// regression threshold while still ensuring malformed inputs never panic.
+// TestBundledCorpus loads and renders every checked-in YM fixture, including
+// historical LH5 files whose redundant header-size field is unreliable.
 func TestBundledCorpus(t *testing.T) {
 	root := testSongPath()
 	var failures []string
@@ -49,7 +48,7 @@ func TestBundledCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded < 952 {
+	if loaded < 968 || len(failures) != 0 {
 		t.Fatalf("loaded only %d files; failures:\n%s", loaded, strings.Join(failures, "\n"))
 	}
 }
@@ -137,9 +136,11 @@ func hashSamples(samples []int16) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// TestRenderRegression locks down the exact PCM output of representative YM5
-// and YM6 songs. The deliberately uneven buffer size also protects the frame
-// scheduler from optimizations that accidentally make rendering chunk-dependent.
+// TestRenderRegression compares representative YM5/YM6 songs with SHA-256
+// hashes generated independently by ST-Sound v1.43 at 44100 Hz, low-pass on,
+// using 882-sample frames. Its signed timer unit and envelope denominator were
+// widened in the reference harness to remove C++ overflow. Uneven Go buffers
+// must produce the same PCM as the reference frame-aligned buffers.
 func TestRenderRegression(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -155,7 +156,7 @@ func TestRenderRegression(t *testing.T) {
 			songType:   "YM 5",
 			songName:   "Goldrunner",
 			durationMs: 188360,
-			wantHash:   "bb982aba16a3d137f87ddc4d07d3f048409b4c559547c417a163a99bc0440ee9",
+			wantHash:   "1eb74ac81a8b02a2342dfdbb5590e497456ef1cab8886ab0d64fdb60bfc8ec21",
 		},
 		{
 			name:       "YM5 digidrum",
@@ -163,7 +164,7 @@ func TestRenderRegression(t *testing.T) {
 			songType:   "YM 5",
 			songName:   "Digizak",
 			durationMs: 130580,
-			wantHash:   "350c881df9320c7a4318b3b0f1040f2c8053e43ce44d442acd5163eb0da1a02f",
+			wantHash:   "a2a08f275be2a4c3209e8f84322863bb4ae670f96f448dc8746ece27743d2db9",
 		},
 		{
 			name:       "YM6 effects",
@@ -171,7 +172,7 @@ func TestRenderRegression(t *testing.T) {
 			songType:   "YM 6",
 			songName:   "Synth Sample 1",
 			durationMs: 133700,
-			wantHash:   "11d05f4a99b4df5941e13632bdccd08d95f9a1b6b27b6ef3dcd1ac034a8cb76f",
+			wantHash:   "e5c8308be55f875a4c1fb4db2c5d3c8b6b06ab7e2eb95951335efe6b22529970",
 		},
 	}
 

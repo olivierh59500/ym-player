@@ -1,7 +1,6 @@
 package stsound
 
 import (
-	//	"bytes"
 	"fmt"
 	"os"
 
@@ -23,7 +22,7 @@ func LoadYMFile(filename string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to decompress LZH: %w", err)
 		}
-		return decompressed, nil
+		data = decompressed
 	}
 
 	// Check if it's a valid YM file
@@ -34,7 +33,8 @@ func LoadYMFile(filename string) ([]byte, error) {
 	return data, nil
 }
 
-// IsYMFile checks if the data represents a valid YM file
+// IsYMFile recognizes a YM-family signature, including the discontinued YM4.
+// Use LoadMemory to validate structure and confirm playback support.
 func IsYMFile(data []byte) bool {
 	if len(data) < 4 {
 		return false

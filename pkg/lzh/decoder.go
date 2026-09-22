@@ -33,9 +33,10 @@ type Decoder struct {
 	inputPos int
 
 	// Bit buffer
-	bitbuf    uint16
-	subbitbuf uint8
-	bitcount  int
+	bitbuf        uint16
+	subbitbuf     uint8
+	bitcount      int
+	bitsRemaining int
 
 	// Huffman trees
 	left     [2*NC - 1]uint16
@@ -78,13 +79,21 @@ func Decompress(data []byte) (output []byte, err error) {
 		return nil, errors.New("LZH header not found")
 	}
 
-	if len(data)-headerStart < 15 {
+	if len(data)-headerStart < 24 {
 		return nil, errors.New("truncated LZH header")
 	}
 	header := data[headerStart:]
 	headerSize := int(header[0])
-	if headerSize < 13 {
+	if headerSize < 22 {
 		return nil, fmt.Errorf("invalid LZH header size: %d", headerSize)
+	}
+
+	if header[20] != 0 {
+		return nil, fmt.Errorf("unsupported LZH header level: %d", header[20])
+	}
+	nameEnd := 22 + int(header[21])
+	if nameEnd+2 > len(header) {
+		return nil, errors.New("truncated LZH filename or CRC")
 	}
 
 	method := header[5]
@@ -95,6 +104,14 @@ func Decompress(data []byte) (output []byte, err error) {
 	packedSize := binary.LittleEndian.Uint32(header[7:11])
 	originalSize := binary.LittleEndian.Uint32(header[11:15])
 	payloadStart := headerStart + headerSize + 2
+	if method == '5' {
+		// ST-Sound derives the level-0 payload from the filename and CRC. Some
+		// authentic archives contain a damaged size byte (notably 0x78), while
+		// their filename length and compressed stream remain intact.
+		payloadStart = headerStart + nameEnd + 2
+	} else if headerSize+2 < nameEnd+2 {
+		return nil, errors.New("LZH header does not contain its filename and CRC")
+	}
 	if payloadStart > len(data) {
 		return nil, errors.New("truncated LZH header")
 	}
@@ -117,13 +134,15 @@ func Decompress(data []byte) (output []byte, err error) {
 		return output, nil
 	}
 
-	output = make([]byte, int(originalSize))
 	decoder := Decoder{input: payload}
-	decoder.decode(output)
-	return output, nil
+	return decoder.decodeSize(int(originalSize)), nil
 }
 
 func (d *Decoder) fillbuf(n int) {
+	if n < 0 || n > BITBUFSIZ || n > d.bitsRemaining {
+		panic("truncated or invalid LZH bitstream")
+	}
+	d.bitsRemaining -= n
 	d.bitbuf = (d.bitbuf << n) & 0xffff
 	for n > d.bitcount {
 		d.bitbuf |= uint16(d.subbitbuf) << (n - d.bitcount)
@@ -152,108 +171,103 @@ func (d *Decoder) init_getbits() {
 	d.subbitbuf = 0
 	d.bitcount = 0
 	d.inputPos = 0
+	// fillbuf keeps sixteen lookahead bits. These may be padded at EOF, but
+	// the decoder may only consume bits actually present in the payload.
+	d.bitsRemaining = len(d.input)*8 + BITBUFSIZ
 	d.fillbuf(BITBUFSIZ)
 }
 
 func (d *Decoder) make_table(nchar int, bitlen []uint8, tablebits int, table []uint16) {
-	var count [17]uint16
-	var weight [17]uint16
-	var start [18]uint16
-
-	// Count bit lengths
-	for i := 1; i <= 16; i++ {
-		count[i] = 0
-	}
-	for i := 0; i < nchar; i++ {
-		if bitlen[i] > 0 && bitlen[i] <= 16 {
-			count[bitlen[i]]++
+	var count [17]int
+	var next [17]int
+	for _, length := range bitlen[:nchar] {
+		if length > 16 {
+			panic("invalid LZH Huffman code length")
+		}
+		if length != 0 {
+			count[length]++
 		}
 	}
-
-	// Calculate starting code values
-	start[1] = 0
-	for i := 1; i <= 16; i++ {
-		start[i+1] = start[i] + (count[i] << (16 - i))
-	}
-	// Check for valid table - in the C++ code, this returns 1 for error
-	// but we'll just continue as the C++ code doesn't check the return value
-
-	// Assign weights
-	jutbits := 16 - tablebits
-	for i := 1; i <= tablebits; i++ {
-		start[i] >>= jutbits
-		weight[i] = 1 << (tablebits - i)
-	}
-	for i := tablebits + 1; i <= 16; i++ {
-		weight[i] = 1 << (16 - i)
-	}
-
-	// Initialize table
-	i := int(start[tablebits+1] >> jutbits)
-	if i != 0 && i < (1<<16) {
-		k := 1 << tablebits
-		for j := i; j < k && j < len(table); j++ {
-			table[j] = 0
+	code := 0
+	for length := 1; length <= 16; length++ {
+		code = (code + count[length-1]) << 1
+		next[length] = code
+		if code+count[length] > 1<<length {
+			panic("oversubscribed LZH Huffman tree")
 		}
 	}
-
-	// Make table
-	avail := uint16(nchar)
-	mask := uint16(1 << (15 - tablebits))
-
-	for ch := 0; ch < nchar; ch++ {
-		bitLength := int(bitlen[ch])
-		if bitLength == 0 {
+	if code+count[16] != 1<<16 {
+		panic("incomplete LZH Huffman tree")
+	}
+	clear(table)
+	available := nchar
+	for symbol, lengthByte := range bitlen[:nchar] {
+		length := int(lengthByte)
+		if length == 0 {
 			continue
 		}
-
-		nextcode := start[bitLength] + weight[bitLength]
-		if bitLength <= tablebits {
-			for i := int(start[bitLength]); i < int(nextcode) && i < len(table); i++ {
-				table[i] = uint16(ch)
+		code := next[length]
+		next[length]++
+		if length <= tablebits {
+			start := code << (tablebits - length)
+			end := (code + 1) << (tablebits - length)
+			for i := start; i < end; i++ {
+				table[i] = uint16(symbol)
 			}
-		} else {
-			k := start[bitLength]
-			idx := int(k >> jutbits)
-			if idx >= len(table) {
-				continue
+			continue
+		}
+		entry := &table[code>>(length-tablebits)]
+		for bit := length - tablebits - 1; bit >= 0; bit-- {
+			if *entry == 0 {
+				if available >= len(d.left) {
+					panic("LZH Huffman tree is too large")
+				}
+				d.left[available], d.right[available] = 0, 0
+				*entry = uint16(available)
+				available++
 			}
-			p := &table[idx]
-			remaining := bitLength - tablebits
-			for remaining > 0 {
-				if *p == 0 {
-					if int(avail) >= len(d.left) {
-						break
-					}
-					d.right[avail] = 0
-					d.left[avail] = 0
-					*p = avail
-					avail++
-				}
-				if int(*p) >= len(d.left) {
-					break
-				}
-				if (k & mask) != 0 {
-					p = &d.right[*p]
-				} else {
-					p = &d.left[*p]
-				}
-				k <<= 1
-				remaining--
+			if int(*entry) < nchar || int(*entry) >= available {
+				panic("invalid LZH Huffman branch")
 			}
-			if remaining == 0 {
-				*p = uint16(ch)
+			if code&(1<<bit) == 0 {
+				entry = &d.left[*entry]
+			} else {
+				entry = &d.right[*entry]
 			}
 		}
-		start[bitLength] = nextcode
+		*entry = uint16(symbol)
 	}
+}
+
+// treeSymbol resolves only the bounded number of branches beyond the lookup
+// table, preventing a malformed archive from creating a cyclic tree walk.
+func (d *Decoder) treeSymbol(symbol uint16, alphabet, tablebits int) uint16 {
+	mask := uint16(1 << (BITBUFSIZ - 1 - tablebits))
+	for symbol >= uint16(alphabet) {
+		if mask == 0 || int(symbol) >= len(d.left) {
+			panic("invalid LZH Huffman tree")
+		}
+		if d.bitbuf&mask == 0 {
+			symbol = d.left[symbol]
+		} else {
+			symbol = d.right[symbol]
+		}
+		mask >>= 1
+	}
+	return symbol
 }
 
 func (d *Decoder) read_pt_len(nn, nbit, i_special int) {
 	n := d.getbits(nbit)
+	if int(n) > nn {
+		panic("invalid LZH position table length")
+	}
 
 	if n == 0 {
 		c := d.getbits(nbit)
+		if int(c) >= nn {
+			panic("invalid LZH position symbol")
+		}
 		for i := 0; i < nn; i++ {
 			d.pt_len[i] = 0
 		}
@@ -277,12 +291,18 @@ func (d *Decoder) read_pt_len(nn, nbit, i_special int) {
 			} else {
 				fillLen = c - 3
 			}
+			if c > 16 {
+				panic("invalid LZH position code length")
+			}
 			d.fillbuf(fillLen)
 			d.pt_len[i] = uint8(c)
 			i++
 
 			if i == i_special {
 				c := d.getbits(2)
+				if i+int(c) > int(n) {
+					panic("invalid LZH position zero run")
+				}
 				for c > 0 {
 					d.pt_len[i] = 0
 					i++
@@ -300,9 +320,15 @@ func (d *Decoder) read_pt_len(nn, nbit, i_special int) {
 
 func (d *Decoder) read_c_len() {
 	n := d.getbits(CBIT)
+	if int(n) > NC {
+		panic("invalid LZH character table length")
+	}
 
 	if n == 0 {
 		c := d.getbits(CBIT)
+		if c >= NC {
+			panic("invalid LZH character symbol")
+		}
 		for i := 0; i < NC; i++ {
 			d.c_len[i] = 0
 		}
@@ -312,18 +338,7 @@ func (d *Decoder) read_c_len() {
 	} else {
 		i := 0
 		for i < int(n) {
-			c := d.pt_table[d.bitbuf>>(BITBUFSIZ-8)]
-			if c >= NT {
-				mask := uint16(1 << (BITBUFSIZ - 1 - 8))
-				for c >= NT {
-					if (d.bitbuf & mask) != 0 {
-						c = d.right[c]
-					} else {
-						c = d.left[c]
-					}
-					mask >>= 1
-				}
-			}
+			c := d.treeSymbol(d.pt_table[d.bitbuf>>(BITBUFSIZ-8)], NT, 8)
 			d.fillbuf(int(d.pt_len[c]))
 
 			if c <= 2 {
@@ -333,6 +348,9 @@ func (d *Decoder) read_c_len() {
 					c = d.getbits(4) + 3
 				} else {
 					c = d.getbits(CBIT) + 20
+				}
+				if i+int(c) > int(n) {
+					panic("invalid LZH character zero run")
 				}
 				for c > 0 {
 					d.c_len[i] = 0
@@ -355,41 +373,22 @@ func (d *Decoder) read_c_len() {
 func (d *Decoder) decode_c() uint16 {
 	if d.blocksize == 0 {
 		d.blocksize = d.getbits(16)
+		if d.blocksize == 0 {
+			panic("empty LZH Huffman block")
+		}
 		d.read_pt_len(NT, TBIT, 3)
 		d.read_c_len()
 		d.read_pt_len(NP, PBIT, -1)
 	}
 	d.blocksize--
 
-	j := d.c_table[d.bitbuf>>(BITBUFSIZ-12)]
-	if j >= NC {
-		mask := uint16(1 << (BITBUFSIZ - 1 - 12))
-		for j >= NC {
-			if (d.bitbuf & mask) != 0 {
-				j = d.right[j]
-			} else {
-				j = d.left[j]
-			}
-			mask >>= 1
-		}
-	}
+	j := d.treeSymbol(d.c_table[d.bitbuf>>(BITBUFSIZ-12)], NC, 12)
 	d.fillbuf(int(d.c_len[j]))
 	return j
 }
 
 func (d *Decoder) decode_p() uint16 {
-	j := d.pt_table[d.bitbuf>>(BITBUFSIZ-8)]
-	if j >= NP {
-		mask := uint16(1 << (BITBUFSIZ - 1 - 8))
-		for j >= NP {
-			if (d.bitbuf & mask) != 0 {
-				j = d.right[j]
-			} else {
-				j = d.left[j]
-			}
-			mask >>= 1
-		}
-	}
+	j := d.treeSymbol(d.pt_table[d.bitbuf>>(BITBUFSIZ-8)], NP, 8)
 	d.fillbuf(int(d.pt_len[j]))
 	if j != 0 {
 		j--
@@ -398,22 +397,19 @@ func (d *Decoder) decode_p() uint16 {
 	return j
 }
 
-func (d *Decoder) decode(output []byte) {
-	// Initialize
+func (d *Decoder) decodeSize(size int) []byte {
 	d.init_getbits()
 	d.blocksize = 0
 	d.decode_j = 0
-
-	for offset := 0; offset < len(output); {
-		count := len(output) - offset
-		if count > DICSIZ {
-			count = DICSIZ
-		}
-
+	// Grow after decoding each block, so a truncated stream with a forged
+	// original-size field does not trigger an immediate huge allocation.
+	output := make([]byte, 0, min(size, DICSIZ))
+	for len(output) < size {
+		count := min(size-len(output), DICSIZ)
 		d.decodeBuffer(count)
-		copy(output[offset:offset+count], d.outbuf[:count])
-		offset += count
+		output = append(output, d.outbuf[:count]...)
 	}
+	return output
 }
 
 func (d *Decoder) decodeBuffer(count int) {

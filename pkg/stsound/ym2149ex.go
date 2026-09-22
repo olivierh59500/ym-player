@@ -35,10 +35,11 @@ var (
 func buildEnvelopeData() (data [16][2][32]YmU8) {
 	for env := 0; env < len(data); env++ {
 		pse := envWave[env]
-		pos := 0
-		for phase := 0; phase < 2; phase++ {
-			a := pse[phase*2]
-			b := pse[phase*2+1]
+		// Each 32-step phase contains two 16-step segments. The first phase
+		// plays once; the second phase repeats until register 13 is written.
+		for segment := 0; segment < 4; segment++ {
+			a := pse[segment*2]
+			b := pse[segment*2+1]
 			delta := b - a
 			a *= 15
 			for i := 0; i < 16; i++ {
@@ -49,8 +50,7 @@ func buildEnvelopeData() (data [16][2][32]YmU8) {
 				} else if value > 15 {
 					value = 15
 				}
-				data[env][phase][pos] = YmU8(value)
-				pos++
+				data[env][segment/2][(segment%2)*16+i] = YmU8(value)
 			}
 		}
 	}
@@ -165,7 +165,7 @@ func (ym *CYm2149Ex) toneStepCompute(rHigh, rLow YmU8) YmU32 {
 
 	step := YmS64(ym.internalClock)
 	step <<= (15 + 16 - 3)
-	step /= YmS64(per * ym.replayFrequency)
+	step /= YmS64(per) * YmS64(ym.replayFrequency)
 	return YmU32(step)
 }
 
@@ -177,7 +177,7 @@ func (ym *CYm2149Ex) noiseStepCompute(rNoise YmU8) YmU32 {
 
 	step := YmS64(ym.internalClock)
 	step <<= (16 - 1 - 3)
-	step /= YmS64(per * ym.replayFrequency)
+	step /= YmS64(per) * YmS64(ym.replayFrequency)
 	return YmU32(step)
 }
 
@@ -199,11 +199,12 @@ func (ym *CYm2149Ex) envStepCompute(rHigh, rLow YmU8) YmU32 {
 
 	step := YmS64(ym.internalClock)
 	step <<= (16 + 16 - 9)
-	step /= YmS64(per * ym.replayFrequency)
+	step /= YmS64(per) * YmS64(ym.replayFrequency)
 	return YmU32(step)
 }
 
 func (ym *CYm2149Ex) Reset() {
+	ym.posA, ym.posB, ym.posC, ym.noisePos = 0, 0, 0, 0
 	// Clear registers
 	for i := range ym.registers {
 		ym.registers[i] = 0
@@ -266,8 +267,8 @@ func (ym *CYm2149Ex) sidVolumeCompute(voice YmInt, pVol *YmInt) {
 			ym.mixerNC = 0xffff
 		}
 
-		pVoice.DrumPos += pVoice.DrumStep
-		if (pVoice.DrumPos >> DRUM_PREC) >= pVoice.DrumSize {
+		pVoice.DrumPos += uint64(pVoice.DrumStep)
+		if (pVoice.DrumPos >> DRUM_PREC) >= uint64(pVoice.DrumSize) {
 			pVoice.Drum = YmFalse
 			if !pVoice.Sid {
 				ym.effectMask &^= 1 << voice
@@ -346,18 +347,11 @@ func (ym *CYm2149Ex) nextSample() YmSample {
 		}
 	}
 
-	// Only active SID voices need their phase advanced.
-	if ym.effectMask != 0 {
-		if ym.specialEffect[0].Sid {
-			ym.specialEffect[0].SidPos += ym.specialEffect[0].SidStep
-		}
-		if ym.specialEffect[1].Sid {
-			ym.specialEffect[1].SidPos += ym.specialEffect[1].SidStep
-		}
-		if ym.specialEffect[2].Sid {
-			ym.specialEffect[2].SidPos += ym.specialEffect[2].SidStep
-		}
-	}
+	// Stopping SID disables volume writes, but its timer keeps running so
+	// that enabling it again preserves the phase of the reference player.
+	ym.specialEffect[0].SidPos += ym.specialEffect[0].SidStep
+	ym.specialEffect[1].SidPos += ym.specialEffect[1].SidStep
+	ym.specialEffect[2].SidPos += ym.specialEffect[2].SidStep
 
 	// Normalize process
 	ym.dcAdjust.AddSample(vol)
@@ -607,20 +601,32 @@ func (ym *CYm2149Ex) updateSimple(buffer []YmSample) {
 	ym.volE = ymVolumeTable[envelope[envPos>>(32-5)]]
 	ym.dcAdjust.pos, ym.dcAdjust.sum = dcPos, dcSum
 	ym.lowPassFilter[0], ym.lowPassFilter[1] = filter0, filter1
+	for voice := range ym.specialEffect {
+		ym.specialEffect[voice].SidPos += ym.specialEffect[voice].SidStep * YmU32(len(buffer))
+	}
 }
 
 func (ym *CYm2149Ex) DrumStart(voice YmInt, pDrumBuffer []YmU8, drumSize YmU32, drumFreq YmInt) {
-	if len(pDrumBuffer) > 0 && drumSize > 0 {
+	if voice < 0 || voice >= YmInt(len(ym.specialEffect)) || drumFreq <= 0 {
+		return
+	}
+	if uint64(drumSize) > uint64(len(pDrumBuffer)) {
+		drumSize = YmU32(len(pDrumBuffer))
+	}
+	if drumSize > 0 {
 		ym.specialEffect[voice].DrumData = pDrumBuffer
 		ym.specialEffect[voice].DrumPos = 0
 		ym.specialEffect[voice].DrumSize = drumSize
-		ym.specialEffect[voice].DrumStep = YmU32((drumFreq << DRUM_PREC) / ym.replayFrequency)
+		ym.specialEffect[voice].DrumStep = YmU32((uint64(drumFreq) << DRUM_PREC) / uint64(ym.replayFrequency))
 		ym.specialEffect[voice].Drum = YmTrue
 		ym.effectMask |= 1 << voice
 	}
 }
 
 func (ym *CYm2149Ex) DrumStop(voice YmInt) {
+	if voice < 0 || voice >= YmInt(len(ym.specialEffect)) {
+		return
+	}
 	ym.specialEffect[voice].Drum = YmFalse
 	if !ym.specialEffect[voice].Sid {
 		ym.effectMask &^= 1 << voice
@@ -628,8 +634,12 @@ func (ym *CYm2149Ex) DrumStop(voice YmInt) {
 }
 
 func (ym *CYm2149Ex) SidStart(voice, timerFreq, vol YmInt) {
-	// Version integer only
-	tmp := YmU32(timerFreq) * (YmU32(1) << 31) / YmU32(ym.replayFrequency)
+	if voice < 0 || voice >= YmInt(len(ym.specialEffect)) || timerFreq < 0 {
+		return
+	}
+	// Preserve the reference integer player's division before multiplication,
+	// using an unsigned phase unit instead of a signed shift into bit 31.
+	tmp := YmU32(uint64(timerFreq) * ((uint64(1) << 31) / uint64(ym.replayFrequency)))
 	ym.specialEffect[voice].SidStep = tmp
 	ym.specialEffect[voice].SidVol = vol & 15
 	ym.specialEffect[voice].Sid = YmTrue
@@ -637,6 +647,9 @@ func (ym *CYm2149Ex) SidStart(voice, timerFreq, vol YmInt) {
 }
 
 func (ym *CYm2149Ex) SidStop(voice YmInt) {
+	if voice < 0 || voice >= YmInt(len(ym.specialEffect)) {
+		return
+	}
 	ym.specialEffect[voice].Sid = YmFalse
 	if !ym.specialEffect[voice].Drum {
 		ym.effectMask &^= 1 << voice
@@ -644,7 +657,10 @@ func (ym *CYm2149Ex) SidStop(voice YmInt) {
 }
 
 func (ym *CYm2149Ex) SyncBuzzerStart(timerFreq, envShape YmInt) {
-	tmp := YmU32(timerFreq) * (YmU32(1) << 31) / YmU32(ym.replayFrequency)
+	if timerFreq < 0 {
+		return
+	}
+	tmp := YmU32(uint64(timerFreq) * ((uint64(1) << 31) / uint64(ym.replayFrequency)))
 	ym.envShape = envShape & 15
 	ym.syncBuzzerStep = tmp
 	ym.syncBuzzerPhase = 0

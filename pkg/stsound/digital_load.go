@@ -37,8 +37,11 @@ func (ym *CYmMusic) decodeTracker(id YmU32) error {
 	if err != nil {
 		return err
 	}
-	if voices == 0 || voices > MAX_VOICE || rate == 0 || int(rate) > ym.replayRate || frames == 0 || drums == 0 || drums > 256 || loop >= frames {
+	if voices == 0 || voices > MAX_VOICE || rate == 0 || int(rate) > ym.replayRate || frames == 0 {
 		return fmt.Errorf("invalid YMT dimensions or replay rate")
+	}
+	if loop >= frames {
+		loop = 0
 	}
 	ym.nbVoice, ym.playerRate, ym.nbFrame, ym.loopFrame, ym.nbDrum = int(voices), YmInt(rate), int(frames), int(loop), int(drums)
 	ym.attrib = YmInt(flags & 0x0fffffff)
@@ -58,6 +61,15 @@ func (ym *CYmMusic) decodeTracker(id YmU32) error {
 	}
 	if ym.pSongComment, err = r.ntString(); err != nil {
 		return err
+	}
+	// Sample indices occupy one byte, but the file can contain a larger bank
+	// with unused entries, or no samples at all in a silent pattern stream.
+	drumHeaderSize := uint64(2)
+	if id == e_YMT2 {
+		drumHeaderSize = 6
+	}
+	if uint64(drums)*drumHeaderSize > uint64(len(r.remaining())) {
+		return fmt.Errorf("truncated YMT sample bank")
 	}
 	ym.pDrumTab = make([]DigiDrum, drums)
 	for i := range ym.pDrumTab {
@@ -155,8 +167,11 @@ func (ym *CYmMusic) decodeMix() error {
 		if err != nil {
 			return err
 		}
-		if length == 0 || length >= 1<<20 || uint64(start)+uint64(length) > uint64(size) || repeat == 0 || rate == 0 {
+		if length == 0 || uint64(start)+uint64(length) > uint64(size) || repeat == 0 || rate == 0 {
 			return fmt.Errorf("invalid MIX1 block %d", i)
+		}
+		if uint64(rate)<<12 < uint64(ym.replayRate) {
+			return fmt.Errorf("MIX1 block %d rate is too low for the output sample rate", i)
 		}
 		ym.pMixBlock[i] = MixBlock{SampleStart: start, SampleLength: length, NbRepeat: repeat, ReplayFreq: rate}
 	}
