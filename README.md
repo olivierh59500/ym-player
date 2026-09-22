@@ -2,7 +2,7 @@
 
 A cross-platform YM music file player written in Go, supporting the Atari ST YM2149 sound chip music format.
 
-![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)
+![Go Version](https://img.shields.io/badge/Go-1.24.4%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
@@ -13,7 +13,7 @@ YM Player is a modern implementation of the STSound library in Go, capable of pl
 ### Features
 
 - 🎮 **Accurate YM2149 emulation** - Faithful reproduction of the original sound chip
-- 📦 **Multiple format support** - YM2!, YM3!, YM3b, YM5!, YM6!
+- 📦 **Multiple format support** - YM2!, YM3!, YM3b, YM5!, YM6!, MIX1, YMT1, YMT2
 - 🗜️ **LZH compression support** - Handles compressed YM files (LH0, LH4, LH5)
 - 🔊 **Real-time audio playback** - Using Oto v3 for cross-platform audio
 - 🎛️ **Audio controls** - Volume adjustment, looping, low-pass filter
@@ -25,7 +25,7 @@ YM Player is a modern implementation of the STSound library in Go, capable of pl
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.24.4 or higher
 - C compiler (for CGo dependencies)
 - For GUI: System graphics libraries (usually pre-installed)
 
@@ -150,17 +150,75 @@ Options:
 ## Supported Formats
 
 ### YM File Formats
-- **YM2!** - Original YM format
-- **YM3!** - YM3 format
-- **YM3b** - YM3 with loop information
-- **YM5!** - Extended format with metadata
-- **YM6!** - Latest format with additional features
+
+The decoder supports every format implemented by the supplied ST-Sound v1.43:
+
+| Signature | Playback |
+| --- | --- |
+| `YM2!` | MADMAX register streams and the 40 built-in digidrums |
+| `YM3!` | Register streams |
+| `YM3b` | Register streams with a little-endian loop frame |
+| `YM5!` | Metadata, chip clock, frame rate, digidrums and SID |
+| `YM6!` | YM5 features plus effect commands, including sync buzzer |
+| `MIX1` | Sample blocks with source rates and repeats |
+| `YMT1` | Sampled tracker streams, up to eight voices |
+| `YMT2` | Tracker streams with sample repeat lengths and frequency shifts |
+
+YM5/YM6 support interleaved and frame-ordered registers, signed and four-bit
+digidrums, and extension bytes. YMT streams support both layouts as well.
+Invalid historical loop points restart at frame zero. Digital samples are copied
+before conversion, so `LoadMemory` does not modify the caller's data.
+
+`YM4!` is explicitly unsupported in ST-Sound and here. `MIX2` is only an enum in
+the reference, with no decoder. The reference's Sinus-SID routine is empty;
+that command remains a no-op here too.
 
 ### Compression
-- **Uncompressed** - Direct YM files
-- **LH0** - Stored (no compression)
-- **LH4** - LZ77 + Static Huffman
-- **LH5** - LZ77 + Dynamic Huffman
+
+- **Uncompressed** - Direct YM, MIX1 and YMT data
+- **LH5** - Level-0 LHA, matching ST-Sound, including legacy filename-based headers
+- **LH0** - Stored level-0 LHA (an additional Go feature)
+- **LH4** - LZ77 with static Huffman coding (an additional Go feature)
+
+Unsupported header levels, invalid Huffman trees and truncated bitstreams return
+errors. Legacy CRC and header checksums are not enforced, matching ST-Sound.
+
+### Playback compatibility
+
+Audio is mono signed 16-bit PCM. Rendering is independent of callback buffer size
+at a given output rate. Register and tracker frame timing retains ST-Sound's
+integer `outputRate / frameRate` sample interval. Frame rates must fit within
+the selected output rate; MIX source rates must have a nonzero Q12 increment.
+
+Restart and Stop reset chip, sample and filter state. Seeking register/tracker
+music reconstructs earlier playback state, including held notes and effects;
+seeking far into a long song therefore takes more work than jumping a pointer.
+The final frame is rendered in full, and any unused tail of the final buffer is
+silence. A final partially filled buffer is returned by `Compute`; the next call
+returns false. MIX blocks outside their sample buffer are rejected.
+
+### Validation
+
+The compatibility audit compared Go with the supplied C++ engine, independently
+compiled as a local test oracle. No C++ code is needed to build this module.
+
+- All **968 bundled archives** decompress byte-for-byte like ST-Sound and load.
+- A larger local corpus contains **4,933 paths / 3,917 distinct files**. All but
+  one truncated MIX1 file load and render; AddressSanitizer confirms an
+  out-of-bounds read in the reference for that file.
+- **29 distinct tracks**, covering all eight formats, match reference PCM during
+  their playback in 60-second comparisons. Two short tracks differ only after
+  EOF, where Go clears the reference's residual DC-filter tail.
+- Checked-in tests cover all 16 envelope shapes, SID/sync timing, YM2 samples,
+  four-bit drums, large digital samples, loader boundaries, buffer sizes,
+  looping, restart, seeking and final-frame handling.
+
+The C++ audio oracle normalizes its signed `1 << 31` timer unit to unsigned and
+widens its envelope-period multiplication to remove two arithmetic defects.
+Reference PCM hashes in the Go tests record these settings. This validates the
+supplied engine's behavior on these cases; it is not a hardware measurement.
+
+Run the regression suite with `go test -race ./...`.
 
 ### Playlist Formats
 - **M3U** - Standard playlist format
@@ -205,7 +263,7 @@ package main
 
 import (
     "log"
-    "ym-player/pkg/stsound"
+    "github.com/olivierh59500/ym-player/pkg/stsound"
 )
 
 func main() {
@@ -405,7 +463,7 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 ### v1.0.0 (2025-06-05)
 - Initial release
 - Full YM2149 emulation
-- Support for YM2-YM6 formats
+- Support for YM2, YM3, YM3b, YM5 and YM6 formats
 - LZH decompression support
 - Cross-platform audio output
 - WAV export functionality
