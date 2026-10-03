@@ -482,22 +482,10 @@ currently missing from this repository.
 - Check write permissions in the directory
 - Ensure valid filename extension (.m3u or .json)
 
-## Changelog
+## Versions
 
-### v1.1.0 (2025-06-05)
-- Added GUI application with Fyne
-- Playlist management support
-- M3U and JSON playlist formats
-- Modern dark/light theme
-- Improved audio output handling
-- Fixed Oto context management
-- Added precise volume control (1% increments)
-- Known issue: Fyne thread warnings may appear in the GUI console
-
-### v1.0.0 (2025-06-05)
-- Initial release
-- Full YM2149 emulation
-- Support for YM2, YM3, YM3b, YM5 and YM6 formats
-- LZH decompression support
-- Cross-platform audio output
-- WAV export functionality
+The published release is [v1.0.0](https://github.com/olivierh59500/ym-player/releases/tag/v1.0.0).
+See [GitHub releases](https://github.com/olivierh59500/ym-player/releases) and the
+[commit history](https://github.com/olivierh59500/ym-player/commits/main/) for the
+recorded project history. Documentation and presentation updates on `main` do
+not represent a separate player release.
