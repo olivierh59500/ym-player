@@ -6,13 +6,37 @@ A cross-platform YM music file player written in Go, supporting the Atari ST YM2
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-BSD--2--Clause-green)
 
+## Screenshots
+
+Click a capture to open it at full size.
+
+| Terminal player | Fyne playback |
+| --- | --- |
+| [![YM Player terminal output showing file information and playback progress](docs/media/cli.png)](docs/media/cli.png) | [![Fyne player with track metadata, playback controls, and progress](docs/media/gui-playback.png)](docs/media/gui-playback.png) |
+
+| Paused playback | Playlist management |
+| --- | --- |
+| [![Fyne player paused with track metadata and playback position visible](docs/media/gui-paused.png)](docs/media/gui-paused.png) | [![Fyne playlist with multiple tracks and playback options](docs/media/gui-playlist.png)](docs/media/gui-playlist.png) |
+
+## Presentation video
+
+[![Animated preview of the terminal and Fyne YM players](docs/media/preview.gif)](https://github.com/olivierh59500/ym-player/raw/refs/heads/main/docs/media/presentation.mp4)
+
+**[Watch or download the 54-second presentation with sound — MP4](https://github.com/olivierh59500/ym-player/raw/refs/heads/main/docs/media/presentation.mp4)**
+
+The GIF is silent. Open the MP4 to hear the music alongside the terminal and
+Fyne interfaces. English captions are included directly in the video. An [English subtitle file](docs/media/presentation.en.srt) is
+available for players that accept external subtitles. See
+[presentation notes](docs/PRESENTATION.md) for the commands, workflow, and media
+details.
+
 ## Overview
 
-YM Player is a modern implementation of the STSound library in Go, capable of playing YM music files from the Atari ST era. It faithfully emulates the YM2149 sound chip and supports various YM file formats, including compressed files. Available as both command-line tool and graphical application.
+YM Player is a modern implementation of the STSound library in Go, capable of playing YM music files from the Atari ST era. It emulates the YM2149/AY-3-8910 sound chip and decodes register streams, sampled tracker formats, and compressed files. Available as both command-line tool and graphical application.
 
 ### Features
 
-- 🎮 **Accurate YM2149 emulation** - Faithful reproduction of the original sound chip
+- 🎮 **YM2149/AY-3-8910 emulation** - Three tone channels, noise, envelopes, and ST-Sound effects
 - 📦 **Multiple format support** - YM2!, YM3!, YM3b, YM5!, YM6!, MIX1, YMT1, YMT2
 - 🗜️ **LZH compression support** - Handles compressed YM files (LH0, LH4, LH5)
 - 🔊 **Real-time audio playback** - Using Oto v3 for cross-platform audio
@@ -60,13 +84,15 @@ The graphical interface provides an intuitive way to play YM files:
 # Or open with a specific file
 ./ymplayer-gui music.ym
 
-# Note: To suppress Fyne thread warning messages, launch with:
-./ymplayer-gui 2>/dev/null
-# Or on Windows:
-# ymplayer-gui.exe 2>nul
 ```
 
-> **Note**: The GUI may display thread warning messages in the console. These are development warnings from the Fyne framework and do not affect functionality. They can be safely ignored by redirecting stderr as shown above.
+A file passed on the command line loads into the Now Playing panel; press
+**Play** to start it. Files added through **Add** or **File → Add Files** are
+appended to the playlist. Selecting a playlist row loads and starts that track.
+**Add Folder** scans the chosen folder for `.ym` and `.lzh` files.
+
+The current GUI can print Fyne thread warnings. Include those messages and your
+platform details when reporting a GUI problem.
 
 #### GUI Features
 
@@ -89,7 +115,7 @@ The graphical interface provides an intuitive way to play YM files:
   - Shuffle playback
 
 - **File Operations**
-  - Export current track to WAV
+  - Export the current track to mono 16-bit PCM WAV
   - Automatic metadata display
   - Support for compressed YM files
 
@@ -104,6 +130,11 @@ The graphical interface provides an intuitive way to play YM files:
 # Show file information only
 ./ymplayer -info music.ym
 ```
+
+The default output is mono signed 16-bit PCM at 44,100 Hz, using a 2,048-sample
+buffer. Flags must precede the input filename. `-info` prints metadata and exits
+without opening an audio device. `-output null` renders with real-time pacing
+but discards the sound. Press `Ctrl+C` to stop playback.
 
 #### Command-line options
 
@@ -202,7 +233,7 @@ returns false. MIX blocks outside their sample buffer are rejected.
 The compatibility audit compared Go with the supplied C++ engine, independently
 compiled as a local test oracle. No C++ code is needed to build this module.
 
-- All **968 bundled archives** decompress byte-for-byte like ST-Sound and load.
+- All **968 archives in the audit corpus** decompress byte-for-byte like ST-Sound and load.
 - A larger local corpus contains **4,933 paths / 3,917 distinct files**. All but
   one truncated MIX1 file load and render; AddressSanitizer confirms an
   out-of-bounds read in the reference for that file.
@@ -224,6 +255,16 @@ Run the regression suite with `go test -race ./...`.
 - **M3U** - Standard playlist format
 - **JSON** - Extended format with metadata
 
+JSON preserves playlist metadata and all stored paths. The M3U reader accepts
+`.ym` entries and uses each listed path directly; it does not resolve paths
+relative to the playlist file. Use paths that are valid from the application's
+working directory.
+
+The GUI's per-item **Remove**, **Move Up**, and **Move Down** controls are disabled
+placeholders. Sorting, shuffling, and clearing the playlist are implemented.
+After using Previous/Next, the selected-row highlight may remain on the earlier
+entry; the Now Playing panel identifies the loaded track.
+
 ## Project Structure
 
 ```
@@ -232,11 +273,9 @@ ym-player/
 │   ├── ymplayer/       # Command-line player
 │   │   └── main.go
 │   └── ymplayer-gui/   # GUI player
-│       ├── main.go
-│       ├── main_gui.go
-│       ├── gui.go
-│       ├── playlist.go
-│       └── wavoutput-gui.go
+│       ├── main_gui.go # Entry point enabled by -tags gui
+│       ├── gui.go      # Interface, playback, and export actions
+│       └── playlist.go # JSON/M3U, sorting, and shuffle
 ├── pkg/
 │   ├── audio/          # Audio output interfaces
 │   │   ├── output.go
@@ -270,20 +309,20 @@ func main() {
     // Create player with 44.1kHz sample rate
     player := stsound.CreateWithRate(44100)
     defer player.Destroy()
-    
+
     // Load YM file
     if err := player.Load("music.ym"); err != nil {
         log.Fatal(err)
     }
-    
+
     // Get music info
     info := player.GetInfo()
     log.Printf("Title: %s", info.SongName)
     log.Printf("Author: %s", info.SongAuthor)
-    
+
     // Start playback
     player.Play()
-    
+
     // Generate audio samples
     buffer := make([]int16, 2048)
     for player.Compute(buffer, len(buffer)) {
@@ -295,7 +334,11 @@ func main() {
 
 ### Integration with Game Engines
 
-See the [Ebiten integration example](docs/ebiten-integration.md) for using YM Player in game development.
+The [ST-Sound API](pkg/stsound/stsound.go) loads files with `Load` or `LoadMemory`
+and renders mono `int16` samples through `Compute`. Feed those samples into the
+engine's audio stream at the rate used by `CreateWithRate`. Looping, low-pass
+filtering, playback position, and seeking are exposed by the same API. See
+[sampled-format notes](docs/DIGITAL_FORMATS.md) for MIX1 and YMT playback.
 
 ## Technical Details
 
@@ -311,9 +354,9 @@ The emulator accurately reproduces the behavior of the YM2149/AY-3-8910 sound ch
 ### Architecture Support
 
 The player correctly handles endianness differences:
-- YM files use big-endian (Motorola 68000)
-- LZH compression uses little-endian
-- Automatic conversion for Intel/ARM architectures
+- YM5/YM6 numeric fields use big-endian order.
+- The YM3b loop frame and LHA header sizes use little-endian order.
+- Each loader handles the byte order required by its format on Intel and ARM.
 
 ## Building for Different Platforms
 
@@ -337,6 +380,10 @@ GOOS=linux GOARCH=arm64 go build -o ymplayer-linux-arm64 ./cmd/ymplayer
 ```
 
 ### GUI version
+
+These commands also require a C compiler and graphics dependencies for the
+target platform. Changing `GOOS` alone does not provide the GUI cross-compilation
+toolchain.
 
 ```bash
 # Windows
@@ -365,22 +412,9 @@ go test ./...
 # Run with race detector
 go run -race ./cmd/ymplayer music.ym
 
-# Profile CPU usage
-go run ./cmd/ymplayer -cpuprofile=cpu.prof music.ym
-go tool pprof cpu.prof
+# Inspect a track without opening an audio device
+go run ./cmd/ymplayer -info music.ym
 ```
-
-## Screenshots
-
-### GUI Application
-- Modern dark/light theme support
-- Intuitive playlist management
-- Real-time playback visualization
-
-### Features in Action
-- Metadata display with cover art support
-- Progress tracking and time display
-- Volume and filter controls
 
 ## Credits
 
@@ -392,7 +426,8 @@ go tool pprof cpu.prof
 
 ## License
 
-This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICENSE) file for details.
+This project declares the BSD 2-Clause license. A separate `LICENSE` file is
+currently missing from this repository.
 
 ## Resources
 
@@ -411,10 +446,9 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 - Try running the command-line version first
 
 #### Console shows thread warnings
-- These are Fyne framework development warnings
-- They don't affect the application functionality
-- To suppress them, run: `./ymplayer-gui 2>/dev/null`
-- On Windows: `ymplayer-gui.exe 2>nul`
+- Include the messages, platform, and reproduction steps in a bug report.
+- The current GUI may emit these warnings while updating widgets.
+- Use `-info` or WAV export from the CLI when you need a workflow without GUI rendering.
 
 #### Dark theme issues
 - The GUI adapts to your system theme
@@ -458,7 +492,7 @@ This project is licensed under the BSD 2-Clause License - see the [LICENSE](LICE
 - Improved audio output handling
 - Fixed Oto context management
 - Added precise volume control (1% increments)
-- Known issue: Fyne thread warnings (cosmetic only, use `2>/dev/null` to suppress)
+- Known issue: Fyne thread warnings may appear in the GUI console
 
 ### v1.0.0 (2025-06-05)
 - Initial release

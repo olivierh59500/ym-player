@@ -1,0 +1,45 @@
+1
+00:00:00,000 --> 00:00:04,250
+Inspect a YM file from the terminal
+Read its format, composer and duration
+
+2
+00:00:04,250 --> 00:00:18,000
+Play and loop YM music at 48 kHz
+The command-line player reports live progress
+
+3
+00:00:18,000 --> 00:00:20,000
+Two local YM files in one playlist
+
+4
+00:00:20,000 --> 00:00:24,000
+Select a track to start playback
+
+5
+00:00:24,000 --> 00:00:28,000
+Read the title, composer and replay format
+
+6
+00:00:28,000 --> 00:00:31,000
+Pause without losing the current position
+
+7
+00:00:31,000 --> 00:00:36,000
+Resume the same tune
+
+8
+00:00:36,000 --> 00:00:40,000
+Lower the playback volume to 45%
+
+9
+00:00:40,000 --> 00:00:44,000
+Compare the low-pass filter
+
+10
+00:00:44,000 --> 00:00:49,000
+Skip to the next playlist track
+
+11
+00:00:49,000 --> 00:00:54,000
+Enable track looping and playlist repeat
